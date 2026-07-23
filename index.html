@@ -257,21 +257,69 @@ function totalFrames(P){ return P.drawings * P.exposure; }
 
 /* ---------- shared drawing helpers ---------- */
 function poly(c, pts){ c.beginPath(); c.moveTo(pts[0][0],pts[0][1]); for(let i=1;i<pts.length;i++)c.lineTo(pts[i][0],pts[i][1]); c.closePath(); }
-// jagged spike polygon along +x, origin at base
-function spikePts(len, w, jag, seed, di, steps){
-  const L=[],R=[];
-  for(let i=0;i<=steps;i++){
-    const t=i/steps, x=t*len, hw=w*0.5*Math.pow(1-t,0.75);
-    const zig=(i%2?1:-1)*jag*w*0.45*(1-t);
-    const bl=(hash(seed,i*3+1,di)-.5)*w*.3*(1-t), br=(hash(seed,i*3+2,di)-.5)*w*.3*(1-t);
-    L.push([x, -hw+zig*.6+bl]); R.push([x, hw-zig*.6+br]);
+// kinked lightning-bolt spine: 2-3 segments with alternating turns
+function boltSpine(len, dir, seed, jag){
+  const segN = 2 + (hash(seed,0,1)<0.5?1:0);
+  const fr=[0.48,0.34,0.26];
+  let total=0; for(let i=0;i<segN;i++) total+=fr[i];
+  let a=dir, sign = hash(seed,1,1)<0.5?1:-1;
+  const pts=[{x:0,y:0}];
+  let px=0,py=0;
+  for(let i=0;i<segN;i++){
+    const sl = len*fr[i]/total;
+    px+=Math.cos(a)*sl; py+=Math.sin(a)*sl;
+    pts.push({x:px,y:py});
+    a += sign*(0.5 + jag*0.5 + hash(seed,i+2,1)*0.4);
+    sign=-sign;
   }
-  L.push([len+ (hash(seed,97,di)-.5)*w*.2, 0]);
-  return L.concat(R.reverse());
+  return pts;
 }
-function drawSpike(c, x,y, ang, len, w, jag, seed, di, fill){
-  c.save(); c.translate(x,y); c.rotate(ang);
-  poly(c, spikePts(len,w,jag,seed,di,4)); c.fillStyle=fill; c.fill(); c.restore();
+// bolt = chain of overlapping sharp darts (triangles) along the spine,
+// with backward barb triangles at the joints. cut>0 recedes the base.
+function drawBolt(c, ox, oy, spine, w, seed, di, cut, fill){
+  const n=spine.length;
+  const cum=[0];
+  for(let i=1;i<n;i++)cum.push(cum[i-1]+Math.hypot(spine[i].x-spine[i-1].x,spine[i].y-spine[i-1].y));
+  const L=cum[n-1]; if(L<3) return;
+  const startD=clamp(cut,0,0.9)*L;
+  let i0=1; while(i0<n-1&&cum[i0]<=startD)i0++;
+  const t0=(startD-cum[i0-1])/Math.max(1e-4,cum[i0]-cum[i0-1]);
+  const nodes=[{x:lerp(spine[i0-1].x,spine[i0].x,t0),y:lerp(spine[i0-1].y,spine[i0].y,t0),d:startD}];
+  for(let j=i0;j<n;j++) nodes.push({x:spine[j].x,y:spine[j].y,d:cum[j]});
+  const m=nodes.length;
+  const hwAt=(k)=>{
+    const tf=(nodes[k].d-startD)/Math.max(1,L-startD);
+    return Math.max(0.7, w*0.5*Math.pow(1-tf,1.1)*(1+(hash(seed,k*7,di)-.5)*0.25));
+  };
+  c.save(); c.translate(ox,oy);
+  c.beginPath();
+  for(let k=0;k<m-1;k++){
+    const a=nodes[k], b=nodes[k+1];
+    let tx=b.x-a.x, ty=b.y-a.y; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
+    const nx=-ty, ny=tx;
+    const hw=hwAt(k);
+    const ext = (k+1===m-1)? Math.max(hw*1.5, w*0.5) : hwAt(k+1)*1.3;  // needle past the joint
+    c.moveTo(a.x+nx*hw, a.y+ny*hw);
+    c.lineTo(b.x+tx*ext, b.y+ty*ext);
+    c.lineTo(a.x-nx*hw, a.y-ny*hw);
+    if(k===0) c.lineTo(a.x+tx*hw*0.8, a.y+ty*hw*0.8);   // concave V-notch at the root
+    c.closePath();
+    if(k>0){ // backward barb on the outer side of this joint
+      const pa=nodes[k-1];
+      let px=a.x-pa.x, py=a.y-pa.y; const pl=Math.hypot(px,py)||1; px/=pl; py/=pl;
+      const z=px*ty-py*tx;                        // turn direction
+      const s=z>0? -1:1;
+      const bl=hw*(2.0+hash(seed,k*9,di)*0.9);
+      // barb points backward (against prev segment) and outward
+      const bx=a.x+(-px*0.8+nx*s)*bl*0.75, by=a.y+(-py*0.8+ny*s)*bl*0.75;
+      c.moveTo(a.x+nx*hw*0.95*s, a.y+ny*hw*0.95*s);
+      c.lineTo(bx, by);
+      c.lineTo(a.x-nx*hw*0.15*s, a.y-ny*hw*0.15*s);
+      c.closePath();
+    }
+  }
+  c.fillStyle=fill; c.fill();
+  c.restore();
 }
 // irregular star polygon (impact core / flash silhouette)
 function starPts(cx,cy, rOut, rIn, n, seed, di, ang0){
@@ -290,80 +338,110 @@ function starPts(cx,cy, rOut, rIn, n, seed, di, ang0){
 function drawBurst(c, g, P, di){
   const ph = phaseOf(di,P), pal = PALETTES[P.pal];
   const R = g.len * P.energy;                       // reach
-  const dirA = g.ang, bias = g.hasDir ? 0.55 : 0;
+  const dirA = g.ang;
   const rng = mulberry32(P.seed);
-  const n = P.detail;
-  // per-spike base features (stable across drawings)
-  const spikes=[];
-  for(let i=0;i<n;i++){
-    const a = i/n*TAU + rng()*0.5 - 0.25 + dirA;
-    const m = 1 + bias*Math.cos(a - dirA);
-    spikes.push({a, len:R*(0.55+rng()*0.6)*m, w:R*(0.13+rng()*0.12), s:(rng()*1e6)|0});
+  // 2-3 directional clusters, roughly opposed → diagonal composition
+  const nC = 2 + (rng()<0.4?1:0);
+  const cdirs=[dirA + (rng()-0.5)*0.5,
+               dirA + Math.PI + (rng()-0.5)*0.9];
+  if(nC>2) cdirs.push(dirA + (rng()<0.5?1:-1)*Math.PI/2 + (rng()-0.5)*0.6);
+  const cscale=[1, 0.7+rng()*0.4, 0.5+rng()*0.35];
+  // limbs: kinked bolts assigned to clusters, mixed colors
+  const limbs=[];
+  const nL = Math.max(4, P.detail);
+  const ccol = [pal.primary, pal.secondary, pal.core];   // each cluster owns a color
+  for(let i=0;i<nL;i++){
+    const ci = i % nC;
+    const dir = cdirs[ci] + (rng()-0.5)*0.6;
+    const len = R*(0.55+rng()*0.6)*cscale[ci];
+    const s = (rng()*1e6)|0;
+    const base = ccol[ci%3];
+    const col = rng()<0.65? base : (rng()<0.5? pal.core : (base===pal.primary? pal.secondary : pal.primary));
+    limbs.push({spine:boltSpine(len,dir,s,P.jag), dir, len, s, col,
+                w:len*(0.15+rng()*0.09)*(0.7+P.jag*0.45),
+                base:R*(0.08+rng()*0.14),          // hollow center: limbs root off-origin
+                echo: col===pal.primary && rng()<0.6});
   }
-  const debris=[];
-  for(let i=0;i<n*2;i++){
-    const a = rng()*TAU, sp = 0.5+rng()*0.9;
-    debris.push({a, sp, sz:R*(0.015+rng()*0.03), s:(rng()*1e6)|0});
+  // thin dash confetti
+  const ticks=[];
+  for(let i=0;i<nL*2;i++){
+    ticks.push({a:rng()*TAU, r:0.3+rng()*0.75, len:R*(0.05+rng()*0.09), sp:0.6+rng()*0.8,
+                col: rng()<0.7? pal.debris : pal.core, s:(rng()*1e6)|0});
   }
+  const tickW = Math.max(1.1, R*0.012);
   c.save(); c.translate(g.x,g.y);
 
-  if(ph.name==='antic'){ // converging ticks + contracted core
-    c.strokeStyle=pal.ink; c.lineCap='round';
-    for(const s of spikes){
-      const r1=s.len*0.55, r0=s.len*0.30;
-      c.lineWidth=Math.max(1.5, s.w*0.12);
+  if(ph.name==='antic'){ // thin dashes converging + tiny dark chip
+    c.lineCap='round'; c.lineWidth=tickW;
+    for(const t of ticks){
+      if(hash(t.s,9,0)<0.35) continue;
+      const r1=R*t.r*0.8, r0=Math.max(R*0.12, r1-t.len*1.6);
+      c.strokeStyle = hash(t.s,3,0)<0.5? pal.ink : pal.secondary;
       c.beginPath();
-      c.moveTo(Math.cos(s.a)*r1, Math.sin(s.a)*r1);
-      c.lineTo(Math.cos(s.a)*r0, Math.sin(s.a)*r0);
+      c.moveTo(Math.cos(t.a)*r1, Math.sin(t.a)*r1);
+      c.lineTo(Math.cos(t.a)*r0, Math.sin(t.a)*r0);
       c.stroke();
     }
-    poly(c, starPts(0,0, R*0.10, R*0.05, 5, P.seed, di, dirA));
+    poly(c, starPts(0,0, R*0.07, R*0.035, 4, P.seed, di, dirA));
     c.fillStyle=pal.ink; c.fill();
   }
-  else if(ph.name==='flash'){ // full white silhouette
-    poly(c, starPts(0,0, R*1.02, R*0.34, n, P.seed, di, dirA));
-    c.fillStyle=pal.core; c.fill();
-    poly(c, starPts(0,0, R*0.5, R*0.2, n, P.seed+7, di, dirA));
+  else if(ph.name==='flash'){ // whole limb set as one white silhouette, inflated
+    for(const l of limbs) drawBolt(c, Math.cos(l.dir)*l.base, Math.sin(l.dir)*l.base, l.spine, l.w*1.6, l.s, di, 0, pal.core);
+    poly(c, starPts(0,0, R*0.12, R*0.05, 4, P.seed+7, di, dirA));
     c.fillStyle=pal.primary; c.fill();
   }
-  else if(ph.name==='peak'){
-    for(const s of spikes){ // secondary ticks between mains
-      drawSpike(c,0,0, s.a+TAU/(n*2), s.len*0.55, s.w*0.4, P.jag, s.s+3, di, pal.secondary);
-    }
-    for(const s of spikes){
-      drawSpike(c,0,0, s.a, s.len, s.w, P.jag, s.s, di, pal.primary);
-      drawSpike(c,0,0, s.a, s.len*0.72, s.w*0.45, P.jag, s.s+1, di, pal.core);
-    }
-    poly(c, starPts(0,0, R*0.30, R*0.13, Math.max(5,n-1), P.seed, di, dirA));
-    c.fillStyle=pal.core; c.fill();
-    if(P.debris) drawBurstDebris(c, debris, 0.25, R, pal, di);
-  }
-  else { // decay: spikes recede from the center outward, then debris only
-    const p = ph.p;
-    for(const s of spikes){
-      const inner = s.len*(0.25 + p*1.05);       // trailing edge chases the tip
-      const tip   = s.len*(1.0 - 0.12*p);
-      if(inner >= tip) continue;
-      c.save(); c.translate(Math.cos(s.a)*inner, Math.sin(s.a)*inner); c.rotate(s.a);
-      poly(c, spikePts(tip-inner, s.w*(1-p*0.75), P.jag, s.s, di, 3));
-      c.fillStyle = p<0.45? pal.primary : pal.secondary; c.fill();
+  else {
+    const p = ph.name==='peak'? 0 : ph.p;
+    const cutv = p*0.85, wMul = 1-p*0.6;
+    // fragments detach outward as they recede
+    const put = (l, wm, col, perp) => {
+      const off = l.base + p*R*0.2*(0.6+hash(l.s,13,0)*0.8);
+      c.save();
+      c.translate(Math.cos(l.dir)*off - Math.sin(l.dir)*(perp||0),
+                  Math.sin(l.dir)*off + Math.cos(l.dir)*(perp||0));
+      drawBolt(c,0,0, l.spine, l.w*wm, l.s + (perp?5:0), di, cutv, col);
+      c.restore();
+    };
+    // back pass: offset secondary echoes behind primary limbs (two-tone stack)
+    if(p<0.7) for(const l of limbs) if(l.echo) put(l, 1.25*wMul, pal.secondary, l.w*0.95);
+    for(const l of limbs) if(l.col!==pal.primary) put(l, wMul, l.col);
+    for(const l of limbs) if(l.col===pal.primary) put(l, wMul, p>0.6? pal.secondary : l.col);
+    // detached slivers continuing past long tips
+    for(const l of limbs){
+      if(l.len<R*0.55 || hash(l.s,11,0)<0.4) continue;
+      const tip=l.spine[l.spine.length-1], prev=l.spine[l.spine.length-2];
+      const a=Math.atan2(tip.y-prev.y, tip.x-prev.x);
+      const sl=R*0.15*(1-p*0.7); if(sl<2) continue;
+      c.save();
+      c.translate(tip.x+Math.cos(a)*R*0.06+Math.cos(l.dir)*l.base,
+                  tip.y+Math.sin(a)*R*0.06+Math.sin(l.dir)*l.base);
+      c.rotate(a + (hash(l.s,12,di)-.5)*0.15);
+      poly(c, [[0,l.w*0.14],[sl,0],[0,-l.w*0.14]]);
+      c.fillStyle=l.col; c.fill();
       c.restore();
     }
-    if(P.debris) drawBurstDebris(c, debris, 0.25+p*0.75, R, pal, di);
+    // hollow center: just a small white chip early on
+    if(p<0.3){
+      poly(c, starPts(0,0, R*0.06, R*0.028, 4, P.seed+9, di, dirA));
+      c.fillStyle=pal.core; c.fill();
+    }
+    if(P.debris){
+      c.lineCap='round'; c.lineWidth=tickW;
+      for(const t of ticks){
+        const tr = R*t.r*(0.55 + easeOut(clamp((0.25+p)*t.sp,0,1))*0.8);
+        const tl = t.len*(1-p*0.5); if(tl<1.5) continue;
+        const a = t.a + (hash(t.s,1,di)-.5)*0.1;
+        const ca=Math.cos(a), sa=Math.sin(a);
+        const wob=(hash(t.s,2,di)-.5)*3;
+        c.strokeStyle=t.col;
+        c.beginPath();
+        c.moveTo(ca*tr - sa*wob, sa*tr + ca*wob);
+        c.lineTo(ca*(tr+tl) - sa*wob, sa*(tr+tl) + ca*wob);
+        c.stroke();
+      }
+    }
   }
   c.restore();
-}
-function drawBurstDebris(c, debris, t, R, pal, di){
-  for(const d of debris){
-    const dist = R*(0.35 + easeOut(clamp(t*d.sp,0,1))*0.95);
-    const sz = d.sz*(1 - t*0.6); if(sz<0.6) continue;
-    const x=Math.cos(d.a)*dist + (hash(d.s,1,di)-.5)*4, y=Math.sin(d.a)*dist + (hash(d.s,2,di)-.5)*4;
-    c.save(); c.translate(x,y); c.rotate(hash(d.s,3,di)*TAU);
-    c.fillStyle = hash(d.s,4,0)<0.5? pal.debris : pal.core;
-    if(hash(d.s,5,0)<0.5){ c.beginPath(); c.arc(0,0,sz,0,TAU); c.fill(); }
-    else { poly(c, [[-sz,sz],[sz*1.6,0],[-sz,-sz]]); c.fill(); }
-    c.restore();
-  }
 }
 
 function drawPoof(c, g, P, di){

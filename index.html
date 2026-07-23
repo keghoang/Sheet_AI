@@ -257,114 +257,145 @@ function totalFrames(P){ return P.drawings * P.exposure; }
 
 /* ---------- shared drawing helpers ---------- */
 function poly(c, pts){ c.beginPath(); c.moveTo(pts[0][0],pts[0][1]); for(let i=1;i<pts.length;i++)c.lineTo(pts[i][0],pts[i][1]); c.closePath(); }
-// kinked lightning-bolt spine: 2-3 segments with alternating turns
-function boltSpine(len, dir, seed, jag){
-  const segN = 2 + (hash(seed,0,1)<0.5?1:0);
-  const fr=[0.48,0.34,0.26];
-  let total=0; for(let i=0;i<segN;i++) total+=fr[i];
-  let a=dir, sign = hash(seed,1,1)<0.5?1:-1;
-  const pts=[{x:0,y:0}];
-  let px=0,py=0;
-  for(let i=0;i<segN;i++){
-    const sl = len*fr[i]/total;
-    px+=Math.cos(a)*sl; py+=Math.sin(a)*sl;
-    pts.push({x:px,y:py});
-    a += sign*(0.5 + jag*0.5 + hash(seed,i+2,1)*0.4);
-    sign=-sign;
+
+/* ============================================================
+   Particle-sim burst.
+   Emit energy particles from the hit point; each flies out under
+   heavy drag, snaps direction at 1-2 discrete kink events, and
+   forks child particles at the snaps. The DRAWN SHAPE of a
+   particle is its swept trail: width ∝ remaining energy (fat at
+   emission, needle at the head), momentum-overshoot barbs at the
+   kinks, a lagged echo pass in the secondary color, and a white
+   core stripe where energy is high. Decay = the tail eroding
+   toward the head, so fragments detach and fly outward.
+   ============================================================ */
+const SIM_STEPS=72, SIM_DT=1/SIM_STEPS;
+function burstSim(P, g){
+  const R=g.len*P.energy;
+  const sig=[P.seed,P.detail,P.jag,P.energy,Math.round(g.len),g.ang.toFixed(2)].join('|');
+  if(g._sim && g._sim.sig===sig) return g._sim;
+  const rng=mulberry32(P.seed);
+  // clustered launch directions → diagonal composition
+  const nC=2+(rng()<0.4?1:0);
+  const dirs=[g.ang+(rng()-0.5)*0.5, g.ang+Math.PI+(rng()-0.5)*0.9];
+  if(nC>2) dirs.push(g.ang+(rng()<0.5?1:-1)*Math.PI/2+(rng()-0.5)*0.6);
+  const cscale=[1, 0.72+rng()*0.35, 0.52+rng()*0.3];
+  const ccol=[0,1,2];                                 // cluster color roles: primary/secondary/core
+  const DRAG=0.045;                                   // v(t)=v0·DRAG^t → travels ≈0.31·v0
+  const specs=[], parts=[];
+  const nMajor=Math.max(4, P.detail);
+  for(let i=0;i<nMajor;i++){
+    const ci=i%nC;
+    const targetLen=R*(0.6+rng()*0.5)*cscale[ci];
+    const kinkN=1+(rng()<0.65?1:0);
+    const kt=[]; for(let k2=0;k2<kinkN;k2++) kt.push(0.08+rng()*0.42);
+    kt.sort();
+    let ksgn=rng()<0.5?1:-1;
+    const kinks=kt.map(t=>{const a=ksgn*(0.30+P.jag*0.45+rng()*0.25); ksgn=-ksgn; return {t,a};});
+    const roleRoll=rng();
+    const role = roleRoll<0.62? ccol[ci%3] : (roleRoll<0.84? 2 : (ccol[ci%3]+1)%2);
+    specs.push({dir:dirs[ci]+(rng()-0.5)*0.55, v0:targetLen/0.31, birth:0,
+                w:targetLen*(0.16+rng()*0.08)*(0.7+P.jag*0.4),
+                kinks, role, gen:0, seed:(rng()*1e6)|0, branchP:0.7});
   }
-  return pts;
-}
-// bolt = chain of overlapping sharp darts (triangles) along the spine,
-// with backward barb triangles at the joints. cut>0 recedes the base.
-function drawBolt(c, ox, oy, spine, w, seed, di, cut, fill){
-  const n=spine.length;
-  const cum=[0];
-  for(let i=1;i<n;i++)cum.push(cum[i-1]+Math.hypot(spine[i].x-spine[i-1].x,spine[i].y-spine[i-1].y));
-  const L=cum[n-1]; if(L<3) return;
-  const startD=clamp(cut,0,0.9)*L;
-  let i0=1; while(i0<n-1&&cum[i0]<=startD)i0++;
-  const t0=(startD-cum[i0-1])/Math.max(1e-4,cum[i0]-cum[i0-1]);
-  const nodes=[{x:lerp(spine[i0-1].x,spine[i0].x,t0),y:lerp(spine[i0-1].y,spine[i0].y,t0),d:startD}];
-  for(let j=i0;j<n;j++) nodes.push({x:spine[j].x,y:spine[j].y,d:cum[j]});
-  const m=nodes.length;
-  const hwAt=(k)=>{
-    const tf=(nodes[k].d-startD)/Math.max(1,L-startD);
-    return Math.max(0.7, w*0.5*Math.pow(1-tf,1.1)*(1+(hash(seed,k*7,di)-.5)*0.25));
+  for(let i=0;i<3;i++){ // runt slivers
+    specs.push({dir:rng()*TAU, v0:R*0.45/0.31*(0.6+rng()*0.5), birth:0.04*rng(),
+                w:R*0.035*(0.6+rng()*0.6), kinks:[], role:rng()<0.5?1:2, gen:1,
+                seed:(rng()*1e6)|0, branchP:0});
+  }
+  const branchSpecs=[];
+  const simulate=(sp)=>{
+    const s0=Math.round(sp.birth/SIM_DT);
+    let x=Math.cos(sp.dir)*R*0.05, y=Math.sin(sp.dir)*R*0.05;
+    if(sp.x0!==undefined){ x=sp.x0; y=sp.y0; }
+    let vx=Math.cos(sp.dir)*sp.v0, vy=Math.sin(sp.dir)*sp.v0;
+    const decay=Math.pow(DRAG,SIM_DT);
+    const pts=[{x,y,e:1}], kinkIdx=[];
+    let kq=[...sp.kinks];
+    for(let s=s0+1;s<=SIM_STEPS;s++){
+      const t=s*SIM_DT;
+      if(kq.length && t>=sp.birth+kq[0].t){
+        const k2=kq.shift(), ca=Math.cos(k2.a), sa=Math.sin(k2.a);
+        const pdx=vx, pdy=vy, pv=Math.hypot(vx,vy)||1;
+        kinkIdx.push({i:pts.length-1, dx:pdx/pv, dy:pdy/pv});
+        [vx,vy]=[vx*ca-vy*sa, vx*sa+vy*ca];
+        if(sp.gen===0 && hash(sp.seed,kinkIdx.length,0)<sp.branchP){
+          const bs=hash(sp.seed,kinkIdx.length,1)<0.5?1:-1;
+          branchSpecs.push({dir:Math.atan2(vy,vx)+bs*(0.55+hash(sp.seed,kinkIdx.length,2)*0.5),
+                            v0:pv*0.8, birth:t, w:sp.w*0.5, kinks:[], role:sp.role,
+                            gen:1, seed:(sp.seed+991)|0, branchP:0, x0:x, y0:y});
+        }
+      }
+      vx*=decay; vy*=decay;
+      x+=vx*SIM_DT; y+=vy*SIM_DT;
+      pts.push({x,y,e:Math.hypot(vx,vy)/sp.v0});
+    }
+    parts.push({pts, s0, kinkIdx, w:sp.w, role:sp.role, gen:sp.gen, seed:sp.seed});
   };
-  c.save(); c.translate(ox,oy);
+  for(const sp of specs) simulate(sp);
+  for(const sp of branchSpecs) simulate(sp);
+  g._sim={sig, parts, R};
+  return g._sim;
+}
+// rasterize one trail window as a swept tapered stroke
+function drawTrail(c, part, i0, i1, wMul, fill, di, opts){
+  const pts=part.pts, n=pts.length;
+  i0=clamp(i0,0,n-1); i1=clamp(i1,0,n-1);
+  if(i1-i0<2) return;
+  const po=opts.perp||0;
+  const dirAt=(j)=>{
+    const a=pts[Math.max(i0,j-1)], b=pts[Math.min(i1,j+1)];
+    let dx=b.x-a.x, dy=b.y-a.y; const l=Math.hypot(dx,dy);
+    return l>1e-4? [dx/l,dy/l] : null;
+  };
+  let lastD=[1,0];
+  const Ls=[],Rs=[];
+  const wAt=(j)=>Math.max(0.5, part.w*wMul*Math.pow(pts[j].e,1.25));
+  for(let j=i0;j<=i1;j++){
+    const d=dirAt(j)||lastD; lastD=d;
+    const nx=-d[1], ny=d[0];
+    const w=wAt(j);
+    const jit=(hash(part.seed,j*3,di)-.5)*w*0.4;
+    const px=pts[j].x+nx*(jit+po), py=pts[j].y+ny*(jit+po);
+    Ls.push([px+nx*w, py+ny*w]); Rs.push([px-nx*w, py-ny*w]);
+  }
   c.beginPath();
-  for(let k=0;k<m-1;k++){
-    const a=nodes[k], b=nodes[k+1];
-    let tx=b.x-a.x, ty=b.y-a.y; const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
-    const nx=-ty, ny=tx;
-    const hw=hwAt(k);
-    const ext = (k+1===m-1)? Math.max(hw*1.5, w*0.5) : hwAt(k+1)*1.3;  // needle past the joint
-    c.moveTo(a.x+nx*hw, a.y+ny*hw);
-    c.lineTo(b.x+tx*ext, b.y+ty*ext);
-    c.lineTo(a.x-nx*hw, a.y-ny*hw);
-    if(k===0) c.lineTo(a.x+tx*hw*0.8, a.y+ty*hw*0.8);   // concave V-notch at the root
-    c.closePath();
-    if(k>0){ // backward barb on the outer side of this joint
-      const pa=nodes[k-1];
-      let px=a.x-pa.x, py=a.y-pa.y; const pl=Math.hypot(px,py)||1; px/=pl; py/=pl;
-      const z=px*ty-py*tx;                        // turn direction
-      const s=z>0? -1:1;
-      const bl=hw*(2.0+hash(seed,k*9,di)*0.9);
-      // barb points backward (against prev segment) and outward
-      const bx=a.x+(-px*0.8+nx*s)*bl*0.75, by=a.y+(-py*0.8+ny*s)*bl*0.75;
-      c.moveTo(a.x+nx*hw*0.95*s, a.y+ny*hw*0.95*s);
-      c.lineTo(bx, by);
-      c.lineTo(a.x-nx*hw*0.15*s, a.y-ny*hw*0.15*s);
+  const path=(arr)=>{for(const q of arr) c.lineTo(q[0],q[1]);};
+  // tail cap: concave V-notch when eroded, flat-ish at birth
+  const d0=dirAt(i0)||[1,0];
+  c.moveTo(Ls[0][0],Ls[0][1]);
+  // head: needle along final direction
+  path(Ls);
+  const dH=lastD, wH=wAt(i1);
+  c.lineTo(pts[i1].x+dH[0]*Math.max(wH*2.5, part.w*wMul*0.9),
+           pts[i1].y+dH[1]*Math.max(wH*2.5, part.w*wMul*0.9));
+  path(Rs.reverse());
+  c.lineTo(pts[i0].x+d0[0]*wAt(i0)*0.9, pts[i0].y+d0[1]*wAt(i0)*0.9);
+  c.closePath();
+  // momentum-overshoot barbs at kinks inside the window
+  if(opts.barbs){
+    for(const k2 of part.kinkIdx){
+      if(k2.i<=i0+1||k2.i>=i1) continue;
+      const w=wAt(k2.i), p=pts[k2.i];
+      const bl=w*(2.2+hash(part.seed,k2.i,di)*0.9);
+      const nx=-k2.dy, ny=k2.dx;
+      c.moveTo(p.x+nx*w*0.8, p.y+ny*w*0.8);
+      c.lineTo(p.x+k2.dx*bl, p.y+k2.dy*bl);
+      c.lineTo(p.x-nx*w*0.8, p.y-ny*w*0.8);
       c.closePath();
     }
   }
   c.fillStyle=fill; c.fill();
-  c.restore();
 }
-// irregular star polygon (impact core / flash silhouette)
-function starPts(cx,cy, rOut, rIn, n, seed, di, ang0){
-  const pts=[];
-  for(let i=0;i<n*2;i++){
-    const a=ang0 + i/(n*2)*TAU + (hash(seed,i,di)-.5)*0.22;
-    const r=(i%2===0? rOut*(0.82+hash(seed,i+50,di)*0.36) : rIn*(0.75+hash(seed,i+90,di)*0.5));
-    pts.push([cx+Math.cos(a)*r, cy+Math.sin(a)*r]);
-  }
-  return pts;
-}
-
-/* ============================================================
-   Generators — each renders one held drawing, deterministically
-   ============================================================ */
 function drawBurst(c, g, P, di){
   const ph = phaseOf(di,P), pal = PALETTES[P.pal];
-  const R = g.len * P.energy;                       // reach
+  const R = g.len * P.energy;
   const dirA = g.ang;
-  const rng = mulberry32(P.seed);
-  // 2-3 directional clusters, roughly opposed → diagonal composition
-  const nC = 2 + (rng()<0.4?1:0);
-  const cdirs=[dirA + (rng()-0.5)*0.5,
-               dirA + Math.PI + (rng()-0.5)*0.9];
-  if(nC>2) cdirs.push(dirA + (rng()<0.5?1:-1)*Math.PI/2 + (rng()-0.5)*0.6);
-  const cscale=[1, 0.7+rng()*0.4, 0.5+rng()*0.35];
-  // limbs: kinked bolts assigned to clusters, mixed colors
-  const limbs=[];
-  const nL = Math.max(4, P.detail);
-  const ccol = [pal.primary, pal.secondary, pal.core];   // each cluster owns a color
-  for(let i=0;i<nL;i++){
-    const ci = i % nC;
-    const dir = cdirs[ci] + (rng()-0.5)*0.6;
-    const len = R*(0.55+rng()*0.6)*cscale[ci];
-    const s = (rng()*1e6)|0;
-    const base = ccol[ci%3];
-    const col = rng()<0.65? base : (rng()<0.5? pal.core : (base===pal.primary? pal.secondary : pal.primary));
-    limbs.push({spine:boltSpine(len,dir,s,P.jag), dir, len, s, col,
-                w:len*(0.15+rng()*0.09)*(0.7+P.jag*0.45),
-                base:R*(0.08+rng()*0.14),          // hollow center: limbs root off-origin
-                echo: col===pal.primary && rng()<0.6});
-  }
-  // thin dash confetti
+  const roleCol=[pal.primary, pal.secondary, pal.core];
+  // thin dash confetti (vector overlay)
+  const rng = mulberry32(P.seed+77);
   const ticks=[];
-  for(let i=0;i<nL*2;i++){
+  for(let i=0;i<P.detail*2;i++){
     ticks.push({a:rng()*TAU, r:0.3+rng()*0.75, len:R*(0.05+rng()*0.09), sp:0.6+rng()*0.8,
                 col: rng()<0.7? pal.debris : pal.core, s:(rng()*1e6)|0});
   }
@@ -385,65 +416,82 @@ function drawBurst(c, g, P, di){
     poly(c, starPts(0,0, R*0.07, R*0.035, 4, P.seed, di, dirA));
     c.fillStyle=pal.ink; c.fill();
   }
-  else if(ph.name==='flash'){ // whole limb set as one white silhouette, inflated
-    for(const l of limbs) drawBolt(c, Math.cos(l.dir)*l.base, Math.sin(l.dir)*l.base, l.spine, l.w*1.6, l.s, di, 0, pal.core);
-    poly(c, starPts(0,0, R*0.12, R*0.05, 4, P.seed+7, di, dirA));
-    c.fillStyle=pal.primary; c.fill();
-  }
   else {
-    const p = ph.name==='peak'? 0 : ph.p;
-    const cutv = p*0.85, wMul = 1-p*0.6;
-    // fragments detach outward as they recede
-    const put = (l, wm, col, perp) => {
-      const off = l.base + p*R*0.2*(0.6+hash(l.s,13,0)*0.8);
-      c.save();
-      c.translate(Math.cos(l.dir)*off - Math.sin(l.dir)*(perp||0),
-                  Math.sin(l.dir)*off + Math.cos(l.dir)*(perp||0));
-      drawBolt(c,0,0, l.spine, l.w*wm, l.s + (perp?5:0), di, cutv, col);
-      c.restore();
-    };
-    // back pass: offset secondary echoes behind primary limbs (two-tone stack)
-    if(p<0.7) for(const l of limbs) if(l.echo) put(l, 1.25*wMul, pal.secondary, l.w*0.95);
-    for(const l of limbs) if(l.col!==pal.primary) put(l, wMul, l.col);
-    for(const l of limbs) if(l.col===pal.primary) put(l, wMul, p>0.6? pal.secondary : l.col);
-    // detached slivers continuing past long tips
-    for(const l of limbs){
-      if(l.len<R*0.55 || hash(l.s,11,0)<0.4) continue;
-      const tip=l.spine[l.spine.length-1], prev=l.spine[l.spine.length-2];
-      const a=Math.atan2(tip.y-prev.y, tip.x-prev.x);
-      const sl=R*0.15*(1-p*0.7); if(sl<2) continue;
-      c.save();
-      c.translate(tip.x+Math.cos(a)*R*0.06+Math.cos(l.dir)*l.base,
-                  tip.y+Math.sin(a)*R*0.06+Math.sin(l.dir)*l.base);
-      c.rotate(a + (hash(l.s,12,di)-.5)*0.15);
-      poly(c, [[0,l.w*0.14],[sl,0],[0,-l.w*0.14]]);
-      c.fillStyle=l.col; c.fill();
-      c.restore();
-    }
-    // hollow center: just a small white chip early on
-    if(p<0.3){
-      poly(c, starPts(0,0, R*0.06, R*0.028, 4, P.seed+9, di, dirA));
-      c.fillStyle=pal.core; c.fill();
-    }
-    if(P.debris){
-      c.lineCap='round'; c.lineWidth=tickW;
-      for(const t of ticks){
-        const tr = R*t.r*(0.55 + easeOut(clamp((0.25+p)*t.sp,0,1))*0.8);
-        const tl = t.len*(1-p*0.5); if(tl<1.5) continue;
-        const a = t.a + (hash(t.s,1,di)-.5)*0.1;
-        const ca=Math.cos(a), sa=Math.sin(a);
-        const wob=(hash(t.s,2,di)-.5)*3;
-        c.strokeStyle=t.col;
-        c.beginPath();
-        c.moveTo(ca*tr - sa*wob, sa*tr + ca*wob);
-        c.lineTo(ca*(tr+tl) - sa*wob, sa*(tr+tl) + ca*wob);
-        c.stroke();
+    const sim=burstSim(P,g);
+    const iFor=(part,t)=>Math.round(t/SIM_DT)-part.s0;
+    if(ph.name==='flash'){
+      for(const part of sim.parts)
+        drawTrail(c, part, iFor(part,0), iFor(part,0.55), 1.7, pal.core, di, {barbs:true});
+      poly(c, starPts(0,0, R*0.10, R*0.045, 4, P.seed+7, di, dirA));
+      c.fillStyle=pal.primary; c.fill();
+    } else {
+      const peakIdx=P.flash?2:1;
+      const u=clamp((di-peakIdx)/Math.max(1,P.drawings-1-peakIdx),0,1);
+      const tHead=0.5+0.5*easeOut(u);
+      const tTail=Math.max(0, tHead-(0.62*(1-u)+0.06));
+      const wMul=1-0.45*u;
+      const win=(part)=>[Math.max(0,iFor(part,tTail)), iFor(part,tHead)];
+      // echo pass: lagged, offset, fatter, secondary color — behind everything
+      if(u<0.75) for(const part of sim.parts){
+        if(part.role!==0||part.gen!==0) continue;
+        const [a,b]=win(part);
+        const side=hash(part.seed,5,0)<0.5?1:-1;
+        drawTrail(c, part, Math.max(0,a-3), b-2, wMul*1.35, pal.secondary, di,
+                  {barbs:true, perp:part.w*0.85*side});
+      }
+      for(const part of sim.parts){ if(part.role===0) continue;
+        const [a,b]=win(part);
+        drawTrail(c, part, a, b, wMul, roleCol[part.role], di, {barbs:part.gen===0});
+      }
+      for(const part of sim.parts){ if(part.role!==0) continue;
+        const [a,b]=win(part);
+        drawTrail(c, part, a, b, wMul, u>0.6? pal.secondary : pal.primary, di, {barbs:true});
+      }
+      // white core stripe riding the high-energy stretch of major limbs
+      if(u<0.8) for(const part of sim.parts){
+        if(part.gen!==0) continue;
+        const [a,b]=win(part);
+        let hi=a; while(hi<b && part.pts[hi] && part.pts[hi].e>0.30) hi++;
+        drawTrail(c, part, a, Math.min(hi,b), wMul*0.42, pal.core, di, {});
+      }
+      // small white chip at the hollow center
+      if(u<0.35){
+        poly(c, starPts(0,0, R*0.055, R*0.026, 4, P.seed+9, di, dirA));
+        c.fillStyle=pal.core; c.fill();
+      }
+      if(P.debris){
+        c.lineCap='round'; c.lineWidth=tickW;
+        for(const t of ticks){
+          const tr = R*t.r*(0.55 + easeOut(clamp((0.25+u)*t.sp,0,1))*0.8);
+          const tl = t.len*(1-u*0.5); if(tl<1.5) continue;
+          const a = t.a + (hash(t.s,1,di)-.5)*0.1;
+          const ca=Math.cos(a), sa=Math.sin(a);
+          const wob=(hash(t.s,2,di)-.5)*3;
+          c.strokeStyle=t.col;
+          c.beginPath();
+          c.moveTo(ca*tr - sa*wob, sa*tr + ca*wob);
+          c.lineTo(ca*(tr+tl) - sa*wob, sa*(tr+tl) + ca*wob);
+          c.stroke();
+        }
       }
     }
   }
   c.restore();
 }
+// irregular star polygon (impact core / flash silhouette)
+function starPts(cx,cy, rOut, rIn, n, seed, di, ang0){
+  const pts=[];
+  for(let i=0;i<n*2;i++){
+    const a=ang0 + i/(n*2)*TAU + (hash(seed,i,di)-.5)*0.22;
+    const r=(i%2===0? rOut*(0.82+hash(seed,i+50,di)*0.36) : rIn*(0.75+hash(seed,i+90,di)*0.5));
+    pts.push([cx+Math.cos(a)*r, cy+Math.sin(a)*r]);
+  }
+  return pts;
+}
 
+/* ============================================================
+   Generators — each renders one held drawing, deterministically
+   ============================================================ */
 function drawPoof(c, g, P, di){
   const ph = phaseOf(di,P), pal = PALETTES[P.pal];
   const R = g.len * P.energy;

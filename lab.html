@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glyph Lab — lightning shape studies</title>
+<style>
+  :root{
+    --bg:#14141b; --panel:#1b1b24; --panel2:#22222e; --line:#2c2c3a;
+    --ink:#ecebe3; --muted:#8f8e9c; --accent:#ffd21e;
+    --display:"Avenir Next Condensed","Arial Narrow","Helvetica Neue",system-ui,sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Code",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,sans-serif;font-size:13px;min-height:100vh}
+  header{display:flex;align-items:baseline;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line)}
+  .wordmark{font-family:var(--display);font-weight:700;font-size:20px;letter-spacing:.06em;text-transform:uppercase}
+  .wordmark b{color:var(--accent)}
+  .tagline{color:var(--muted);font-size:12px}
+  header .spacer{flex:1}
+  .btn{appearance:none;border:1px solid var(--line);background:var(--panel2);color:var(--ink);cursor:pointer;
+       font-family:var(--display);font-size:12.5px;letter-spacing:.08em;text-transform:uppercase;
+       padding:7px 13px;border-radius:6px}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn[aria-pressed="true"]{border-color:var(--accent);color:var(--accent);background:#ffd21e14}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#141414}
+  #controls{display:flex;flex-wrap:wrap;align-items:center;gap:18px;padding:10px 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .ctl{display:flex;align-items:center;gap:8px}
+  .ctl label{color:var(--muted);font-size:12px}
+  .ctl output{font-family:var(--mono);font-size:11.5px;color:var(--muted);min-width:34px;text-align:right}
+  input[type=range]{width:110px;accent-color:var(--accent)}
+  #grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;padding:16px 18px;max-width:1500px;margin:0 auto}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
+  .tile h2{margin:0;padding:9px 12px 7px;font-family:var(--display);font-size:12.5px;font-weight:600;
+           letter-spacing:.12em;text-transform:uppercase;color:var(--ink);display:flex;justify-content:space-between;align-items:baseline}
+  .tile h2 small{color:var(--muted);font-size:10.5px;letter-spacing:.05em;text-transform:none;font-family:system-ui}
+  .tile canvas{width:100%;aspect-ratio:4/3;display:block;cursor:pointer}
+  footer{padding:8px 18px 20px;color:var(--muted);font-size:11.5px;max-width:1500px;margin:0 auto}
+</style>
+</head>
+<body>
+<header>
+  <span class="wordmark">Glyph<b>&hairsp;Lab</b></span>
+  <span class="tagline">four skeleton generators, one calligraphic sweep — click any tile to reroll it</span>
+  <span class="spacer"></span>
+  <button class="btn" id="modeBtn" aria-pressed="false">Composition mode</button>
+  <button class="btn primary" id="rerollAll">Reroll all</button>
+</header>
+<div id="controls">
+  <div class="ctl"><label for="cTurn">Hairpin</label><input id="cTurn" type="range" min="90" max="170" value="138"><output>138°</output></div>
+  <div class="ctl"><label for="cSeg">Segments</label><input id="cSeg" type="range" min="3" max="6" value="4"><output>4</output></div>
+  <div class="ctl"><label for="cWid">Width</label><input id="cWid" type="range" min="0.08" max="0.30" step="0.01" value="0.17"><output>0.17</output></div>
+  <div class="ctl"><label for="cNeed">Needles</label><input id="cNeed" type="range" min="0" max="2.5" step="0.1" value="1.3"><output>1.3</output></div>
+</div>
+<div id="grid"></div>
+<footer>
+  Skeletons differ per tile; every tile is rendered by the same sweep: double-tapered width (needle at both ends,
+  fat mid-stroke), sharp miter spikes on the outer side of each hairpin, concave notches on the inner side, straight
+  edges — no jitter. Composition mode arranges glyphs in a ring around a hollow impact point with an approach needle,
+  parallel slivers, micro-dashes, and a center scribble, pairing overlapped two-tone glyphs like the reference.
+</footer>
+<script>
+'use strict';
+const TAU=Math.PI*2;
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const lerp=(a,b,t)=>a+(b-a)*t, clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
+const PAL={primary:'#ffe23c', secondary:'#4fe8ff', core:'#ffffff', debris:'#8ce84a', plate:'#77777d'};
+const state={turn:138, segs:4, width:0.17, needle:1.3, mode:false};
+
+/* ============================================================
+   THE SWEEP — shared calligraphic renderer.
+   pts: sharp polyline skeleton (few points). Width profile is
+   double-tapered (pointed both ends), per-vertex jittered.
+   Outer side of each bend gets a clamped miter spike; inner side
+   self-overlaps into a concave notch (nonzero winding).
+   ============================================================ */
+function sweep(c, pts, wMax, rng, opts={}){
+  const n=pts.length; if(n<2) return;
+  const cum=[0];
+  for(let i=1;i<n;i++) cum.push(cum[i-1]+Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]));
+  const L=cum[n-1]; if(L<1e-3) return;
+  const dirs=[], nors=[];
+  for(let i=0;i<n-1;i++){
+    let dx=pts[i+1][0]-pts[i][0], dy=pts[i+1][1]-pts[i][1];
+    const l=Math.hypot(dx,dy)||1; dx/=l; dy/=l;
+    dirs.push([dx,dy]); nors.push([-dy,dx]);
+  }
+  // per-vertex width: double taper + jitter, small floor at tips
+  const wv=[];
+  for(let i=0;i<n;i++){
+    const t=cum[i]/L;
+    const prof=Math.pow(Math.sin(Math.PI*clamp(t,0.02,0.98)), 0.62);
+    const jit=(i===0||i===n-1)? 1 : 0.75+rng()*0.5;
+    wv.push(Math.max(wMax*0.06, wMax*prof*jit));
+  }
+  c.beginPath();
+  // segment quads
+  for(let i=0;i<n-1;i++){
+    const [nx,ny]=nors[i];
+    c.moveTo(pts[i][0]+nx*wv[i],   pts[i][1]+ny*wv[i]);
+    c.lineTo(pts[i+1][0]+nx*wv[i+1], pts[i+1][1]+ny*wv[i+1]);
+    c.lineTo(pts[i+1][0]-nx*wv[i+1], pts[i+1][1]-ny*wv[i+1]);
+    c.lineTo(pts[i][0]-nx*wv[i],   pts[i][1]-ny*wv[i]);
+    c.closePath();
+  }
+  // outer miter spikes at bends
+  for(let i=1;i<n-1;i++){
+    const d0=dirs[i-1], d1=dirs[i], n0=nors[i-1], n1=nors[i];
+    const z=d0[0]*d1[1]-d0[1]*d1[0];
+    const s=z>0?-1:1;
+    const ax=pts[i][0]+n0[0]*s*wv[i], ay=pts[i][1]+n0[1]*s*wv[i];
+    const bx=pts[i][0]+n1[0]*s*wv[i], by=pts[i][1]+n1[1]*s*wv[i];
+    let mx=(ax+bx)/2-pts[i][0], my=(ay+by)/2-pts[i][1];
+    const ml=Math.hypot(mx,my)||1e-4; mx/=ml; my/=ml;
+    // sharper turn → longer outer spike (the whip point)
+    const dot=-(d0[0]*d1[0]+d0[1]*d1[1]);            // ≈1 at full hairpin
+    const k=clamp(1.2+2.6*Math.max(0,dot), 1.2, 3.8)*wv[i];
+    c.moveTo(ax,ay); c.lineTo(pts[i][0]+mx*k, pts[i][1]+my*k); c.lineTo(bx,by); c.closePath();
+  }
+  // terminal needles
+  const nd=(opts.needle??state.needle);
+  if(nd>0.01){
+    const tip=(pi,d,sign,wBase)=>{
+      const nl=wMax*nd*(0.8+rng()*0.9);
+      const [nx,ny]=[-d[1],d[0]];
+      c.moveTo(pi[0]+nx*wBase, pi[1]+ny*wBase);
+      c.lineTo(pi[0]+d[0]*sign*nl, pi[1]+d[1]*sign*nl);
+      c.lineTo(pi[0]-nx*wBase, pi[1]-ny*wBase);
+      c.closePath();
+    };
+    tip(pts[0],   dirs[0],   -1, wv[0]*0.9);
+    tip(pts[n-1], dirs[n-2],  1, wv[n-1]*0.9);
+  }
+  c.fillStyle=opts.fill||PAL.primary;
+  c.fill();
+}
+
+/* ============================================================
+   SKELETON GENERATORS
+   All return {pts:[[x,y]...]} in arbitrary units; caller fits.
+   ============================================================ */
+// A · Calligraphic: hand-designed zigzag — alternating hairpins,
+// decaying segment lengths, slight global drift.
+function skelCalligraphic(rng){
+  const n=state.segs;
+  let th=rng()*TAU, L=1, x=0, y=0;
+  let sgn=rng()<0.5?1:-1;
+  const pts=[[0,0]];
+  for(let i=0;i<n;i++){
+    x+=Math.cos(th)*L; y+=Math.sin(th)*L;
+    pts.push([x,y]);
+    const turn=Math.PI - (Math.PI-state.turn*Math.PI/180) * (0.7+rng()*0.6);
+    th += sgn*turn + (rng()-0.5)*0.25;               // hairpin ± drift
+    if(rng()<0.8) sgn=-sgn;                          // mostly alternate, sometimes double back
+    L*=0.6+rng()*0.35;
+  }
+  return {pts};
+}
+// B · Whip sim: momentum walk with 2-3 "crack" reversals, then
+// Douglas-Peucker down to a handful of sharp points.
+function skelWhip(rng){
+  const steps=42;
+  let th=rng()*TAU, sp=1;
+  const cracks=[]; const nc=2+(rng()<0.5?1:0);
+  for(let i=0;i<nc;i++) cracks.push(0.15+rng()*0.6);
+  cracks.sort();
+  let sgn=rng()<0.5?1:-1, ci=0;
+  const raw=[[0,0]]; let x=0,y=0;
+  for(let s2=1;s2<=steps;s2++){
+    const t=s2/steps;
+    if(ci<cracks.length && t>=cracks[ci]){
+      th += sgn*(Math.PI - (Math.PI-state.turn*Math.PI/180)*(0.7+rng()*0.6));
+      sgn=-sgn; ci++;
+      sp*=0.8;
+    }
+    th += (rng()-0.5)*0.14;                          // mild wander
+    sp *= 0.975;
+    x+=Math.cos(th)*sp; y+=Math.sin(th)*sp;
+    raw.push([x,y]);
+  }
+  return {pts:simplify(raw, extentOf(raw)*0.07), slim:0.6};
+}
+function extentOf(pts){
+  let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+  for(const p of pts){x0=Math.min(x0,p[0]);y0=Math.min(y0,p[1]);x1=Math.max(x1,p[0]);y1=Math.max(y1,p[1]);}
+  return Math.max(x1-x0,y1-y0);
+}
+function simplify(pts, eps){
+  if(pts.length<3) return pts;
+  const keep=new Array(pts.length).fill(false);
+  keep[0]=keep[pts.length-1]=true;
+  const stack=[[0,pts.length-1]];
+  while(stack.length){
+    const [a,b]=stack.pop();
+    let dmax=0, idx=-1;
+    const [ax,ay]=pts[a], [bx,by]=pts[b];
+    const dx=bx-ax, dy=by-ay, dl=Math.hypot(dx,dy)||1e-9;
+    for(let i=a+1;i<b;i++){
+      const d=Math.abs((pts[i][0]-ax)*dy-(pts[i][1]-ay)*dx)/dl;
+      if(d>dmax){dmax=d;idx=i;}
+    }
+    if(dmax>eps){keep[idx]=true;stack.push([a,idx],[idx,b]);}
+  }
+  return pts.filter((_,i)=>keep[i]);
+}
+// C · Cut-paper: union of chained elongated shards, then real
+// triangular bites cut out with destination-out.
+function skelShard(rng){ // returns its own draw, flagged
+  return {custom:true};
+}
+function drawShard(c, W, H, scale, cx, cy, rng, fill){
+  const off=document.createElement('canvas'); off.width=W; off.height=H;
+  const oc=off.getContext('2d');
+  oc.translate(cx,cy);
+  let th=rng()*TAU, L=scale*(1.2+rng()*0.5), x=0,y=0;
+  let sgn=rng()<0.5?1:-1;
+  const joints=[[0,0]];
+  oc.fillStyle=fill;
+  const nSh=state.segs;
+  for(let i=0;i<nSh;i++){
+    const w=L*(state.width*1.0)*(0.7+rng()*0.6);
+    const dx=Math.cos(th), dy=Math.sin(th), nx=-dy, ny=dx;
+    const tx=x+dx*L, ty=y+dy*L;
+    oc.beginPath();                                   // elongated shard, base slightly behind joint
+    oc.moveTo(x-dx*w*0.8+nx*w, y-dy*w*0.8+ny*w);
+    oc.lineTo(tx, ty);
+    oc.lineTo(x-dx*w*0.8-nx*w, y-dy*w*0.8-ny*w);
+    oc.closePath(); oc.fill();
+    joints.push([tx,ty]);
+    x=tx*0.92+x*0.08; y=ty*0.92+y*0.08;               // next shard roots just short of the tip
+    th += sgn*(Math.PI-(Math.PI-state.turn*Math.PI/180)*(0.7+rng()*0.6));
+    sgn=-sgn;
+    L*=0.75+rng()*0.15;
+  }
+  // real concave bites
+  oc.globalCompositeOperation='destination-out';
+  const nB=2;
+  for(let i=0;i<nB;i++){
+    const j=joints[1+(rng()*(joints.length-1)|0)];
+    const a=rng()*TAU, bl=scale*(0.12+rng()*0.15);
+    oc.beginPath();
+    oc.moveTo(j[0]+Math.cos(a)*bl, j[1]+Math.sin(a)*bl);
+    oc.lineTo(j[0]+Math.cos(a+2.4)*bl*0.7, j[1]+Math.sin(a+2.4)*bl*0.7);
+    oc.lineTo(j[0]+Math.cos(a-2.4)*bl*0.7, j[1]+Math.sin(a-2.4)*bl*0.7);
+    oc.closePath(); oc.fill();
+  }
+  c.drawImage(off,0,0);
+}
+// D · Grammar + mirror: short ruleset glyph with optional branch,
+// plus a mirrored twin — the paired "jaws" of the reference.
+function skelGrammar(rng){
+  const base=skelCalligraphic(rng);
+  base.pts=base.pts.slice(0,4);                      // jaws read best short: 3 segments
+  const out=[base.pts];
+  // branch: small 2-segment fork off an interior joint
+  if(base.pts.length>3 && rng()<0.5){
+    const j=1+(rng()*(base.pts.length-3)|0);
+    const p=base.pts[j], q=base.pts[j+1];
+    let th=Math.atan2(q[1]-p[1],q[0]-p[0]) + (rng()<0.5?1:-1)*(1.1+rng()*0.7);
+    const l=Math.hypot(q[0]-p[0],q[1]-p[1]);
+    const b=[[p[0],p[1]]];
+    let x=p[0]+Math.cos(th)*l*0.55, y=p[1]+Math.sin(th)*l*0.55;
+    b.push([x,y]);
+    th+= (rng()<0.5?1:-1)*(Math.PI-0.6);
+    b.push([x+Math.cos(th)*l*0.3, y+Math.sin(th)*l*0.3]);
+    out.push(b);
+  }
+  return {multi:out, mirror:rng()<0.8};
+}
+
+/* ============================================================
+   Fitting & tiles
+   ============================================================ */
+function fitDraw(c, skel, W, H, rng, fill, scaleMul=1){
+  const all = skel.multi? skel.multi.flat() : skel.pts;
+  let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+  for(const p of all){x0=Math.min(x0,p[0]);y0=Math.min(y0,p[1]);x1=Math.max(x1,p[0]);y1=Math.max(y1,p[1]);}
+  const ex=Math.max(x1-x0,y1-y0)||1;
+  const s=Math.min(W,H)*0.32*scaleMul/ (ex/2);
+  const cx=(x0+x1)/2, cy=(y0+y1)/2;
+  const tx=p=>[(p[0]-cx)*s+W/2, (p[1]-cy)*s+H/2];
+  const wMax=ex*state.width*s*(skel.slim||1);
+  const lists = skel.multi? skel.multi : [skel.pts];
+  // jaws: shift base and twin apart across the mirror axis so the center stays hollow
+  const a0=Math.atan2(all[all.length-1][1]-all[0][1], all[all.length-1][0]-all[0][0]);
+  const sep=skel.mirror? wMax*2.6 : 0;
+  const sx=-Math.sin(a0)*sep, sy=Math.cos(a0)*sep;
+  for(const pts of lists){
+    const m=pts.map(tx).map(p=>[p[0]-sx,p[1]-sy]);
+    sweep(c, m, wMax*(pts===lists[0]?1:0.55), rng, {fill});
+  }
+  if(skel.mirror){ // mirrored twin across the glyph's mean direction, slightly rotated
+    const ref=p=>{
+      let dx=p[0]-cx, dy=p[1]-cy;
+      const ca=Math.cos(-a0), sa=Math.sin(-a0);
+      let rx=dx*ca-dy*sa, ry=dx*sa+dy*ca;
+      ry=-ry;
+      const cb=Math.cos(a0+0.3), sb=Math.sin(a0+0.3);
+      return [(rx*cb-ry*sb)*s*0.88+W/2+sx, (rx*sb+ry*cb)*s*0.88+H/2+sy];
+    };
+    for(const pts of lists) sweep(c, pts.map(ref), wMax*0.8*(pts===lists[0]?1:0.55), rng, {fill});
+  }
+}
+
+/* ---------- accents shared by composition mode ---------- */
+function accents(c, W, H, rng){
+  // approach needle: long straight double sliver aimed at center
+  const a=rng()*TAU;
+  const r0=Math.min(W,H)*0.46, r1=Math.min(W,H)*0.18;
+  const px=Math.cos(a), py=Math.sin(a);
+  for(const [off,wid,l0,l1] of [[0, 7, r0, r1],[12, 3.5, r0*0.85, r1*1.25]]){
+    const ox=-py*off, oy=px*off;
+    c.beginPath();
+    c.moveTo(W/2+px*l0+ox+py*wid, H/2+py*l0+oy-px*wid);
+    c.lineTo(W/2+px*l1+ox, H/2+py*l1+oy);
+    c.lineTo(W/2+px*l0+ox-py*wid, H/2+py*l0+oy+px*wid);
+    c.closePath();
+    c.fillStyle=PAL.secondary; c.fill();
+  }
+  // green micro-dashes
+  c.lineCap='round'; c.strokeStyle=PAL.debris; c.lineWidth=2;
+  const nD=10+(rng()*6|0);
+  for(let i=0;i<nD;i++){
+    const da=rng()*TAU, dr=Math.min(W,H)*(0.10+rng()*0.22);
+    const dl=4+rng()*14, wob=(rng()-0.5)*0.5;
+    c.beginPath();
+    c.moveTo(W/2+Math.cos(da)*dr, H/2+Math.sin(da)*dr);
+    c.lineTo(W/2+Math.cos(da+wob)*(dr+dl), H/2+Math.sin(da+wob)*(dr+dl));
+    c.stroke();
+  }
+  // center scribble: tiny white 2-seg glyph
+  const mini={pts:[[0,0],[1,-0.3],[0.25,0.45],[1.1,0.6]]};
+  const rot=rng()*TAU, sc=Math.min(W,H)*0.05;
+  const tx=p=>[W/2+(p[0]*Math.cos(rot)-p[1]*Math.sin(rot))*sc, H/2+(p[0]*Math.sin(rot)+p[1]*Math.cos(rot))*sc];
+  sweep(c, mini.pts.map(tx), sc*0.5, rng, {fill:PAL.core, needle:0.6});
+}
+function composition(c, W, H, rng, gen){
+  // ring of glyph slots facing a hollow center
+  const slots=[
+    {a:-Math.PI/2+(rng()-0.5)*0.5, r:0.33, sc:0.52, col:PAL.secondary, pair:null},
+    {a: 0.2+(rng()-0.5)*0.6,       r:0.28, sc:0.68, col:PAL.primary,  pair:null},
+    {a: 2.2+(rng()-0.5)*0.6,       r:0.37, sc:0.48, col:PAL.secondary, pair:PAL.core},
+  ];
+  for(const sl of slots){
+    const cx=W/2+Math.cos(sl.a)*Math.min(W,H)*sl.r;
+    const cy=H/2+Math.sin(sl.a)*Math.min(W,H)*sl.r;
+    const draw=(fill,dx,dy,scMul)=>{
+      if(gen==='C'){ drawShard(c, W, H, Math.min(W,H)*0.28*sl.sc*scMul, cx+dx, cy+dy, rng, fill); return; }
+      c.save(); c.translate(cx-W/2+dx, cy-H/2+dy);
+      fitDraw(c, GENS[gen].make(rng), W, H, rng, fill, sl.sc*scMul);
+      c.restore();
+    };
+    if(sl.pair){ draw(sl.col,0,0,1); draw(sl.pair, Math.min(W,H)*0.03, -Math.min(W,H)*0.02, 0.8); }
+    else draw(sl.col,0,0,1);
+  }
+  accents(c, W, H, rng);
+}
+
+/* ---------- tile plumbing ---------- */
+const GENS={
+  A:{name:'A · Calligraphic', sub:'hand-designed hairpin zigzag', make:skelCalligraphic},
+  B:{name:'B · Whip sim', sub:'momentum walk + crack reversals → simplify', make:skelWhip},
+  C:{name:'C · Cut-paper', sub:'chained shards + real boolean bites', make:skelShard},
+  D:{name:'D · Grammar', sub:'ruleset + branch + mirrored twin', make:skelGrammar},
+};
+const seeds={A:101,B:202,C:303,D:404};
+const grid=document.getElementById('grid');
+const tiles={};
+for(const k of Object.keys(GENS)){
+  const t=document.createElement('div'); t.className='tile';
+  t.innerHTML=`<h2>${GENS[k].name}<small>${GENS[k].sub}</small></h2>`;
+  const cv=document.createElement('canvas');
+  t.appendChild(cv); grid.appendChild(t);
+  cv.addEventListener('click',()=>{seeds[k]=(seeds[k]*48271+7)%2147483647; render(k);});
+  tiles[k]=cv;
+}
+function render(k){
+  const cv=tiles[k], dpr=Math.min(devicePixelRatio||1,2);
+  const W=cv.clientWidth*dpr, H=cv.clientHeight*dpr;
+  cv.width=W; cv.height=H;
+  const c=cv.getContext('2d');
+  c.fillStyle=PAL.plate; c.fillRect(0,0,W,H);
+  const rng=mulberry32(seeds[k]);
+  if(state.mode){ composition(c,W,H,rng,k); return; }
+  if(k==='C'){ drawShard(c,W,H,Math.min(W,H)*0.30, W/2, H/2, rng, PAL.primary); return; }
+  const skel=GENS[k].make(rng);
+  fitDraw(c, skel, W, H, rng, k==='B'? PAL.secondary : k==='D'? PAL.secondary : PAL.primary);
+}
+function renderAll(){ for(const k of Object.keys(GENS)) render(k); }
+addEventListener('resize', renderAll);
+document.getElementById('rerollAll').addEventListener('click',()=>{
+  for(const k of Object.keys(GENS)) seeds[k]=(seeds[k]*69621+13)%2147483647;
+  renderAll();
+});
+const modeBtn=document.getElementById('modeBtn');
+modeBtn.addEventListener('click',()=>{
+  state.mode=!state.mode;
+  modeBtn.setAttribute('aria-pressed',state.mode);
+  renderAll();
+});
+function bind(id,key,fmt){
+  const el=document.getElementById(id), out=el.nextElementSibling;
+  const show=()=>out.textContent=fmt(el.value);
+  el.addEventListener('input',()=>{state[key]=parseFloat(el.value); show(); renderAll();});
+  show();
+}
+bind('cTurn','turn',v=>v+'°');
+bind('cSeg','segs',v=>v);
+bind('cWid','width',v=>v);
+bind('cNeed','needle',v=>v);
+requestAnimationFrame(renderAll);
+</script>
+</body>
+</html>

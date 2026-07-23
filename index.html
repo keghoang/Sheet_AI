@@ -258,140 +258,48 @@ function totalFrames(P){ return P.drawings * P.exposure; }
 /* ---------- shared drawing helpers ---------- */
 function poly(c, pts){ c.beginPath(); c.moveTo(pts[0][0],pts[0][1]); for(let i=1;i<pts.length;i++)c.lineTo(pts[i][0],pts[i][1]); c.closePath(); }
 
+const GLYPHS=[{"n":"bottomCyan","r":"sec","z":1,"p":[[1.096,0.945],[0.884,1.024],[0.896,0.978],[0.833,0.98],[0.849,0.889],[0.669,1.067],[0.709,1.084],[0.624,1.207],[0.32,1.347],[0.216,1.298],[-0.456,1.605],[-0.336,1.589],[-0.529,1.68],[-0.091,1.684],[0.185,1.496],[-0.051,1.578],[0.331,1.367],[0.569,1.318],[0.542,1.38],[0.667,1.384],[0.698,1.307],[0.771,1.335],[0.735,1.311],[1.096,1.236],[1.02,1.193],[1.096,1.144]]},{"n":"crown","r":"sec","z":2,"p":[[0.54,-0.847],[0.285,-0.598],[0.305,-0.702],[0.204,-0.605],[0.193,-0.669],[0.144,-0.591],[0.076,-0.667],[0.042,-0.845],[0.009,-0.845],[-0.013,-0.651],[0.024,-0.66],[0.089,-0.58],[0.147,-0.395],[0.215,-0.438],[0.091,-0.216],[0.122,-0.235],[0.116,-0.205],[0.209,-0.305]]},{"n":"needle","r":"sec","z":2,"p":[[-0.335,0.484],[-0.52,0.704],[-0.573,0.718],[-0.831,1.189],[-0.542,0.836]]},{"n":"crown","r":"sec","z":2,"p":[[-0.382,-0.78],[-0.178,-0.445],[-0.176,-0.518],[-0.14,-0.516],[-0.011,-0.382],[-0.124,-0.722],[-0.153,-0.635],[-0.2,-0.598]]},{"n":"needle","r":"sec","z":2,"p":[[-0.156,0.476],[-0.242,0.593],[-0.262,0.778]]},{"n":"jawR","r":"pri","z":4,"p":[[0.525,-0.469],[0.129,-0.171],[0.071,-0.187],[-0.044,-0.104],[-0.013,-0.089],[0.104,-0.116],[0.115,-0.089],[0.162,-0.095],[0.253,-0.144],[0.176,0.033],[0.095,0.036],[0.085,0.075],[0.036,0.085],[0.14,0.131],[0.16,0.107],[0.313,0.14],[0.209,0.06],[0.202,0.022]]},{"n":"jawL","r":"pri","z":4,"p":[[-0.482,-0.449],[-0.345,-0.191],[-0.353,-0.171],[-0.4,-0.173],[-0.278,-0.06],[-0.276,-0.036],[-0.322,0.024],[-0.236,-0.015],[-0.267,-0.075],[-0.242,-0.082],[-0.318,-0.233],[-0.216,-0.162],[-0.104,-0.142],[-0.271,-0.316],[-0.329,-0.325]]},{"n":"xCrack","r":"core","z":5,"p":[[1.096,1.453],[0.707,1.32],[0.685,1.338],[0.689,1.389],[0.533,1.395],[0.515,1.373],[0.56,1.333],[0.245,1.409],[0.256,1.46],[0.182,1.56],[0.427,1.385],[0.82,1.569],[0.753,1.482],[0.751,1.425],[1.095,1.471]]},{"n":"xCrack","r":"core","z":5,"p":[[0.009,0.938],[0.187,1.185],[0.193,1.227],[0.145,1.247],[0.231,1.302],[0.262,1.305],[0.282,1.336],[0.327,1.329],[0.356,1.295],[0.358,1.271],[0.311,1.22],[0.396,1.238],[0.507,1.144],[0.405,1.165],[0.22,1.036],[0.238,1.075]]},{"n":"tealChip","r":"ink","z":6,"p":[[-0.015,-0.067],[-0.009,-0.047],[-0.031,-0.045],[0.029,-0.013],[0.055,0.027],[0.056,0.015],[0.08,0.027],[0.104,0.004],[0.08,-0.08],[0.047,-0.073],[0.035,-0.049]]},{"n":"scribble","r":"core","z":7,"p":[[-0.085,0.04],[-0.049,0.055],[-0.024,0.031],[0.033,0.009],[-0.011,-0.029],[-0.049,-0.036],[-0.064,-0.016],[-0.056,0.018]]}];
+
 /* ============================================================
-   Particle-sim burst.
-   Emit energy particles from the hit point; each flies out under
-   heavy drag, snaps direction at 1-2 discrete kink events, and
-   forks child particles at the snaps. The DRAWN SHAPE of a
-   particle is its swept trail: width ∝ remaining energy (fat at
-   emission, needle at the head), momentum-overshoot barbs at the
-   kinks, a lagged echo pass in the secondary color, and a white
-   core stripe where energy is high. Decay = the tail eroding
-   toward the head, so fragments detach and fly outward.
+   Glyph burst — captured template composition through the
+   timing grammar. GLYPHS are vector templates auto-traced from
+   the reference frame, normalized around the impact point.
+   Per drawing: variation "take" (boil), then decay = glyphs
+   drift outward, shrink to slivers, and pop off one by one.
    ============================================================ */
-const SIM_STEPS=72, SIM_DT=1/SIM_STEPS;
-function burstSim(P, g){
-  const R=g.len*P.energy;
-  const sig=[P.seed,P.detail,P.jag,P.energy,Math.round(g.len),g.ang.toFixed(2)].join('|');
-  if(g._sim && g._sim.sig===sig) return g._sim;
-  const rng=mulberry32(P.seed);
-  // clustered launch directions → diagonal composition
-  const nC=2+(rng()<0.4?1:0);
-  const dirs=[g.ang+(rng()-0.5)*0.5, g.ang+Math.PI+(rng()-0.5)*0.9];
-  if(nC>2) dirs.push(g.ang+(rng()<0.5?1:-1)*Math.PI/2+(rng()-0.5)*0.6);
-  const cscale=[1, 0.72+rng()*0.35, 0.52+rng()*0.3];
-  const ccol=[0,1,2];                                 // cluster color roles: primary/secondary/core
-  const DRAG=0.045;                                   // v(t)=v0·DRAG^t → travels ≈0.31·v0
-  const specs=[], parts=[];
-  const nMajor=Math.max(4, P.detail);
-  for(let i=0;i<nMajor;i++){
-    const ci=i%nC;
-    const targetLen=R*(0.6+rng()*0.5)*cscale[ci];
-    const kinkN=1+(rng()<0.65?1:0);
-    const kt=[]; for(let k2=0;k2<kinkN;k2++) kt.push(0.08+rng()*0.42);
-    kt.sort();
-    let ksgn=rng()<0.5?1:-1;
-    const kinks=kt.map(t=>{const a=ksgn*(0.30+P.jag*0.45+rng()*0.25); ksgn=-ksgn; return {t,a};});
-    const roleRoll=rng();
-    const role = roleRoll<0.62? ccol[ci%3] : (roleRoll<0.84? 2 : (ccol[ci%3]+1)%2);
-    specs.push({dir:dirs[ci]+(rng()-0.5)*0.55, v0:targetLen/0.31, birth:0,
-                w:targetLen*(0.16+rng()*0.08)*(0.7+P.jag*0.4),
-                kinks, role, gen:0, seed:(rng()*1e6)|0, branchP:0.7});
+// irregular star polygon (impact core / flash silhouette)
+function starPts(cx,cy, rOut, rIn, n, seed, di, ang0){
+  const pts=[];
+  for(let i=0;i<n*2;i++){
+    const a=ang0 + i/(n*2)*TAU + (hash(seed,i,di)-.5)*0.22;
+    const r=(i%2===0? rOut*(0.82+hash(seed,i+50,di)*0.36) : rIn*(0.75+hash(seed,i+90,di)*0.5));
+    pts.push([cx+Math.cos(a)*r, cy+Math.sin(a)*r]);
   }
-  for(let i=0;i<3;i++){ // runt slivers
-    specs.push({dir:rng()*TAU, v0:R*0.45/0.31*(0.6+rng()*0.5), birth:0.04*rng(),
-                w:R*0.035*(0.6+rng()*0.6), kinks:[], role:rng()<0.5?1:2, gen:1,
-                seed:(rng()*1e6)|0, branchP:0});
-  }
-  const branchSpecs=[];
-  const simulate=(sp)=>{
-    const s0=Math.round(sp.birth/SIM_DT);
-    let x=Math.cos(sp.dir)*R*0.05, y=Math.sin(sp.dir)*R*0.05;
-    if(sp.x0!==undefined){ x=sp.x0; y=sp.y0; }
-    let vx=Math.cos(sp.dir)*sp.v0, vy=Math.sin(sp.dir)*sp.v0;
-    const decay=Math.pow(DRAG,SIM_DT);
-    const pts=[{x,y,e:1}], kinkIdx=[];
-    let kq=[...sp.kinks];
-    for(let s=s0+1;s<=SIM_STEPS;s++){
-      const t=s*SIM_DT;
-      if(kq.length && t>=sp.birth+kq[0].t){
-        const k2=kq.shift(), ca=Math.cos(k2.a), sa=Math.sin(k2.a);
-        const pdx=vx, pdy=vy, pv=Math.hypot(vx,vy)||1;
-        kinkIdx.push({i:pts.length-1, dx:pdx/pv, dy:pdy/pv});
-        [vx,vy]=[vx*ca-vy*sa, vx*sa+vy*ca];
-        if(sp.gen===0 && hash(sp.seed,kinkIdx.length,0)<sp.branchP){
-          const bs=hash(sp.seed,kinkIdx.length,1)<0.5?1:-1;
-          branchSpecs.push({dir:Math.atan2(vy,vx)+bs*(0.55+hash(sp.seed,kinkIdx.length,2)*0.5),
-                            v0:pv*0.8, birth:t, w:sp.w*0.5, kinks:[], role:sp.role,
-                            gen:1, seed:(sp.seed+991)|0, branchP:0, x0:x, y0:y});
-        }
-      }
-      vx*=decay; vy*=decay;
-      x+=vx*SIM_DT; y+=vy*SIM_DT;
-      pts.push({x,y,e:Math.hypot(vx,vy)/sp.v0});
-    }
-    parts.push({pts, s0, kinkIdx, w:sp.w, role:sp.role, gen:sp.gen, seed:sp.seed});
-  };
-  for(const sp of specs) simulate(sp);
-  for(const sp of branchSpecs) simulate(sp);
-  g._sim={sig, parts, R};
-  return g._sim;
+  return pts;
 }
-// rasterize one trail window as a swept tapered stroke
-function drawTrail(c, part, i0, i1, wMul, fill, di, opts){
-  const pts=part.pts, n=pts.length;
-  i0=clamp(i0,0,n-1); i1=clamp(i1,0,n-1);
-  if(i1-i0<2) return;
-  const po=opts.perp||0;
-  const dirAt=(j)=>{
-    const a=pts[Math.max(i0,j-1)], b=pts[Math.min(i1,j+1)];
-    let dx=b.x-a.x, dy=b.y-a.y; const l=Math.hypot(dx,dy);
-    return l>1e-4? [dx/l,dy/l] : null;
-  };
-  let lastD=[1,0];
-  const Ls=[],Rs=[];
-  const wAt=(j)=>Math.max(0.5, part.w*wMul*Math.pow(pts[j].e,1.25));
-  for(let j=i0;j<=i1;j++){
-    const d=dirAt(j)||lastD; lastD=d;
-    const nx=-d[1], ny=d[0];
-    const w=wAt(j);
-    const jit=(hash(part.seed,j*3,di)-.5)*w*0.4;
-    const px=pts[j].x+nx*(jit+po), py=pts[j].y+ny*(jit+po);
-    Ls.push([px+nx*w, py+ny*w]); Rs.push([px-nx*w, py-ny*w]);
-  }
-  c.beginPath();
-  const path=(arr)=>{for(const q of arr) c.lineTo(q[0],q[1]);};
-  // tail cap: concave V-notch when eroded, flat-ish at birth
-  const d0=dirAt(i0)||[1,0];
-  c.moveTo(Ls[0][0],Ls[0][1]);
-  // head: needle along final direction
-  path(Ls);
-  const dH=lastD, wH=wAt(i1);
-  c.lineTo(pts[i1].x+dH[0]*Math.max(wH*2.5, part.w*wMul*0.9),
-           pts[i1].y+dH[1]*Math.max(wH*2.5, part.w*wMul*0.9));
-  path(Rs.reverse());
-  c.lineTo(pts[i0].x+d0[0]*wAt(i0)*0.9, pts[i0].y+d0[1]*wAt(i0)*0.9);
-  c.closePath();
-  // momentum-overshoot barbs at kinks inside the window
-  if(opts.barbs){
-    for(const k2 of part.kinkIdx){
-      if(k2.i<=i0+1||k2.i>=i1) continue;
-      const w=wAt(k2.i), p=pts[k2.i];
-      const bl=w*(2.2+hash(part.seed,k2.i,di)*0.9);
-      const nx=-k2.dy, ny=k2.dx;
-      c.moveTo(p.x+nx*w*0.8, p.y+ny*w*0.8);
-      c.lineTo(p.x+k2.dx*bl, p.y+k2.dy*bl);
-      c.lineTo(p.x-nx*w*0.8, p.y-ny*w*0.8);
-      c.closePath();
-    }
-  }
-  c.fillStyle=fill; c.fill();
+function centroid(pts){let x=0,y=0;for(const q of pts){x+=q[0];y+=q[1];}return [x/pts.length,y/pts.length];}
+// perturb spike lengths / rotation / scale — a new "take" of the same design
+function varyPoly(pts, rng, amt){
+  const c=centroid(pts);
+  const rad=pts.map(q=>Math.hypot(q[0]-c[0],q[1]-c[1]));
+  const med=rad.slice().sort((a,b)=>a-b)[rad.length>>1];
+  const rot=(rng()-0.5)*0.16*amt, sc=1+(rng()-0.5)*0.2*amt;
+  const ca=Math.cos(rot), sa=Math.sin(rot);
+  return pts.map((q,i)=>{
+    let dx=q[0]-c[0], dy=q[1]-c[1];
+    let k=sc;
+    if(rad[i]>med*1.12) k*=1+(rng()-0.5)*0.5*amt;
+    dx*=k; dy*=k;
+    return [c[0]+dx*ca-dy*sa, c[1]+dx*sa+dy*ca];
+  });
 }
 function drawBurst(c, g, P, di){
   const ph = phaseOf(di,P), pal = PALETTES[P.pal];
   const R = g.len * P.energy;
   const dirA = g.ang;
-  const roleCol=[pal.primary, pal.secondary, pal.core];
+  const rot = dirA + 1.02;                 // align the approach needle with the drag
+  const scale = R*0.62;                    // glyph coords are unit-normalized around the hit
+  const ROLE = {pri:pal.primary, sec:pal.secondary, core:pal.core, ink:pal.ink};
   // thin dash confetti (vector overlay)
   const rng = mulberry32(P.seed+77);
   const ticks=[];
@@ -402,7 +310,7 @@ function drawBurst(c, g, P, di){
   const tickW = Math.max(1.1, R*0.012);
   c.save(); c.translate(g.x,g.y);
 
-  if(ph.name==='antic'){ // thin dashes converging + tiny dark chip
+  if(ph.name==='antic'){ // converging dashes + tiny dark chip
     c.lineCap='round'; c.lineWidth=tickW;
     for(const t of ticks){
       if(hash(t.s,9,0)<0.35) continue;
@@ -417,76 +325,50 @@ function drawBurst(c, g, P, di){
     c.fillStyle=pal.ink; c.fill();
   }
   else {
-    const sim=burstSim(P,g);
-    const iFor=(part,t)=>Math.round(t/SIM_DT)-part.s0;
-    if(ph.name==='flash'){
-      for(const part of sim.parts)
-        drawTrail(c, part, iFor(part,0), iFor(part,0.55), 1.7, pal.core, di, {barbs:true});
-      poly(c, starPts(0,0, R*0.10, R*0.045, 4, P.seed+7, di, dirA));
-      c.fillStyle=pal.primary; c.fill();
-    } else {
-      const peakIdx=P.flash?2:1;
-      const u=clamp((di-peakIdx)/Math.max(1,P.drawings-1-peakIdx),0,1);
-      const tHead=0.5+0.5*easeOut(u);
-      const tTail=Math.max(0, tHead-(0.62*(1-u)+0.06));
-      const wMul=1-0.45*u;
-      const win=(part)=>[Math.max(0,iFor(part,tTail)), iFor(part,tHead)];
-      // echo pass: lagged, offset, fatter, secondary color — behind everything
-      if(u<0.75) for(const part of sim.parts){
-        if(part.role!==0||part.gen!==0) continue;
-        const [a,b]=win(part);
-        const side=hash(part.seed,5,0)<0.5?1:-1;
-        drawTrail(c, part, Math.max(0,a-3), b-2, wMul*1.35, pal.secondary, di,
-                  {barbs:true, perp:part.w*0.85*side});
+    const flash = ph.name==='flash';
+    const p = ph.name==='decay'? ph.p : 0;
+    const rngV = mulberry32(P.seed + di*101);   // boil: new take per held drawing
+    const amt = 0.3 + P.jag*0.5;
+    const ca=Math.cos(rot), sa=Math.sin(rot);
+    for(let gi=0; gi<GLYPHS.length; gi++){
+      const gl=GLYPHS[gi];
+      // small center accents leave right after the peak; big masses linger
+      const drop = (gl.n==='scribble'||gl.n==='tealChip')? 0.3 : 0.5+hash(P.seed,gi,3)*0.45;
+      if(p>=drop) continue;
+      const q = p/drop;
+      let pts = varyPoly(gl.p, rngV, amt);
+      const cg = centroid(pts);
+      const drift = 1 + q*0.4;                  // fragment flies outward…
+      const shrink = (flash?1.07:1) * (1 - q*0.7);  // …while eroding to a sliver
+      pts = pts.map(q2=>[cg[0]*drift + (q2[0]-cg[0])*shrink,
+                         cg[1]*drift + (q2[1]-cg[1])*shrink]);
+      c.beginPath();
+      for(let i=0;i<pts.length;i++){
+        const X=pts[i][0]*scale, Y=pts[i][1]*scale;
+        const sx=X*ca-Y*sa, sy=X*sa+Y*ca;
+        i? c.lineTo(sx,sy) : c.moveTo(sx,sy);
       }
-      for(const part of sim.parts){ if(part.role===0) continue;
-        const [a,b]=win(part);
-        drawTrail(c, part, a, b, wMul, roleCol[part.role], di, {barbs:part.gen===0});
-      }
-      for(const part of sim.parts){ if(part.role!==0) continue;
-        const [a,b]=win(part);
-        drawTrail(c, part, a, b, wMul, u>0.6? pal.secondary : pal.primary, di, {barbs:true});
-      }
-      // white core stripe riding the high-energy stretch of major limbs
-      if(u<0.8) for(const part of sim.parts){
-        if(part.gen!==0) continue;
-        const [a,b]=win(part);
-        let hi=a; while(hi<b && part.pts[hi] && part.pts[hi].e>0.30) hi++;
-        drawTrail(c, part, a, Math.min(hi,b), wMul*0.42, pal.core, di, {});
-      }
-      // small white chip at the hollow center
-      if(u<0.35){
-        poly(c, starPts(0,0, R*0.055, R*0.026, 4, P.seed+9, di, dirA));
-        c.fillStyle=pal.core; c.fill();
-      }
-      if(P.debris){
-        c.lineCap='round'; c.lineWidth=tickW;
-        for(const t of ticks){
-          const tr = R*t.r*(0.55 + easeOut(clamp((0.25+u)*t.sp,0,1))*0.8);
-          const tl = t.len*(1-u*0.5); if(tl<1.5) continue;
-          const a = t.a + (hash(t.s,1,di)-.5)*0.1;
-          const ca=Math.cos(a), sa=Math.sin(a);
-          const wob=(hash(t.s,2,di)-.5)*3;
-          c.strokeStyle=t.col;
-          c.beginPath();
-          c.moveTo(ca*tr - sa*wob, sa*tr + ca*wob);
-          c.lineTo(ca*(tr+tl) - sa*wob, sa*(tr+tl) + ca*wob);
-          c.stroke();
-        }
+      c.closePath();
+      c.fillStyle = flash? pal.core : ROLE[gl.r];
+      c.fill();
+    }
+    if(!flash && P.debris){
+      c.lineCap='round'; c.lineWidth=tickW;
+      for(const t of ticks){
+        const tr = R*t.r*(0.55 + easeOut(clamp((0.25+p)*t.sp,0,1))*0.8);
+        const tl = t.len*(1-p*0.5); if(tl<1.5) continue;
+        const a = t.a + (hash(t.s,1,di)-.5)*0.1;
+        const ca2=Math.cos(a), sa2=Math.sin(a);
+        const wob=(hash(t.s,2,di)-.5)*3;
+        c.strokeStyle=t.col;
+        c.beginPath();
+        c.moveTo(ca2*tr - sa2*wob, sa2*tr + ca2*wob);
+        c.lineTo(ca2*(tr+tl) - sa2*wob, sa2*(tr+tl) + ca2*wob);
+        c.stroke();
       }
     }
   }
   c.restore();
-}
-// irregular star polygon (impact core / flash silhouette)
-function starPts(cx,cy, rOut, rIn, n, seed, di, ang0){
-  const pts=[];
-  for(let i=0;i<n*2;i++){
-    const a=ang0 + i/(n*2)*TAU + (hash(seed,i,di)-.5)*0.22;
-    const r=(i%2===0? rOut*(0.82+hash(seed,i+50,di)*0.36) : rIn*(0.75+hash(seed,i+90,di)*0.5));
-    pts.push([cx+Math.cos(a)*r, cy+Math.sin(a)*r]);
-  }
-  return pts;
 }
 
 /* ============================================================

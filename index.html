@@ -287,11 +287,74 @@ function varyPoly(pts, rng, amt){
   const ca=Math.cos(rot), sa=Math.sin(rot);
   return pts.map((q,i)=>{
     let dx=q[0]-c[0], dy=q[1]-c[1];
-    let k=sc;
-    if(rad[i]>med*1.12) k*=1+(rng()-0.5)*0.5*amt;
+    let k=sc, da=0;
+    if(rad[i]>med*1.12){ k*=1+(rng()-0.5)*0.5*amt; da=(rng()-0.5)*0.24*amt; } // apexes migrate, not just stretch
     dx*=k; dy*=k;
-    return [c[0]+dx*ca-dy*sa, c[1]+dx*sa+dy*ca];
+    const cb=Math.cos(rot+da), sb=Math.sin(rot+da);
+    return [c[0]+dx*cb-dy*sb, c[1]+dx*sb+dy*cb];
   });
+}
+/* organic decay: chained shape-evolution operators (unit space, hit at origin) */
+function polyExtent(P){
+  let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+  for(const v of P){x0=Math.min(x0,v[0]);y0=Math.min(y0,v[1]);x1=Math.max(x1,v[0]);y1=Math.max(y1,v[1]);}
+  return Math.max(x1-x0,y1-y0);
+}
+function clipHalf(P, px, py, nx, ny){
+  const out=[];
+  for(let i=0;i<P.length;i++){
+    const a=P[i], b=P[(i+1)%P.length];
+    const da=(a[0]-px)*nx+(a[1]-py)*ny, db=(b[0]-px)*nx+(b[1]-py)*ny;
+    if(da>=0) out.push(a);
+    if((da>=0)!==(db>=0)){
+      const t=da/(da-db);
+      out.push([a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t]);
+    }
+  }
+  return out;
+}
+function evolveGlyph(polys, k, gi, seed){
+  const out=[];
+  polys.forEach((P,pi)=>{
+    if(P.length<3) return;
+    const cg=centroid(P);
+    let rdx=cg[0], rdy=cg[1], rl=Math.hypot(rdx,rdy);
+    if(rl<1e-3){rdx=1;rdy=0;rl=1;}
+    rdx/=rl; rdy/=rl;
+    const ext=polyExtent(P);
+    const pj=P.map(v=>v[0]*rdx+v[1]*rdy);
+    const mn=Math.min.apply(null,pj), mx=Math.max.apply(null,pj), rr=Math.max(1e-4,mx-mn);
+    // leading edge advances, trailing edge collapses onto the radial spine
+    let Q=P.map((v,i)=>{
+      const t=(pj[i]-mn)/rr;
+      const adv=ext*(0.05+0.22*t);
+      let x=v[0]+rdx*adv, y=v[1]+rdy*adv;
+      const cl=(1-t)*0.32;
+      const tx=cg[0]+rdx*ext*0.15, ty=cg[1]+rdy*ext*0.15;
+      x+=(tx-x)*cl; y+=(ty-y)*cl;
+      x+=-rdy*(hash(seed+gi*77+pi,i,k)-0.5)*ext*0.14;
+      y+= rdx*(hash(seed+gi*77+pi,i+40,k)-0.5)*ext*0.14;
+      return [x,y];
+    });
+    // lateral thinning: mass streaks out along its radial axis
+    const c2=centroid(Q);
+    Q=Q.map(v=>{
+      const ax=(v[0]-c2[0])*rdx+(v[1]-c2[1])*rdy;
+      const bx=(v[0]-c2[0])-ax*rdx, by=(v[1]-c2[1])-ax*rdy;
+      return [c2[0]+ax*rdx+bx*0.84, c2[1]+ax*rdy+by*0.84];
+    });
+    // seeded one-time split: the drawn breakup
+    const splitAt=1+((hash(seed,gi*31+pi,999)*2)|0);
+    if(k===splitAt && Q.length>5 && polyExtent(Q)>0.13){
+      const ang=Math.atan2(rdy,rdx)+Math.PI/2+(hash(seed,gi*13+pi,55)-0.5)*0.8;
+      const nx=Math.cos(ang), ny=Math.sin(ang);
+      const g1=clipHalf(Q,c2[0],c2[1],nx,ny), g2=clipHalf(Q,c2[0],c2[1],-nx,-ny);
+      const gap=ext*0.06;
+      out.push(g1.map(v=>[v[0]+nx*gap, v[1]+ny*gap]));
+      out.push(g2.map(v=>[v[0]-nx*gap*1.5, v[1]-ny*gap*1.5]));
+    } else out.push(Q);
+  });
+  return out.filter(P=>P.length>2 && polyExtent(P)>0.03);
 }
 function drawBurst(c, g, P, di){
   const ph = phaseOf(di,P), pal = PALETTES[P.pal];
@@ -330,27 +393,28 @@ function drawBurst(c, g, P, di){
     const rngV = mulberry32(P.seed + di*101);   // boil: new take per held drawing
     const amt = 0.3 + P.jag*0.5;
     const ca=Math.cos(rot), sa=Math.sin(rot);
+    const steps = Math.round(p*4);
     for(let gi=0; gi<GLYPHS.length; gi++){
       const gl=GLYPHS[gi];
-      // small center accents leave right after the peak; big masses linger
-      const drop = (gl.n==='scribble'||gl.n==='tealChip')? 0.3 : 0.5+hash(P.seed,gi,3)*0.45;
-      if(p>=drop) continue;
-      const q = p/drop;
-      let pts = varyPoly(gl.p, rngV, amt);
-      const cg = centroid(pts);
-      const drift = 1 + q*0.4;                  // fragment flies outward…
-      const shrink = (flash?1.07:1) * (1 - q*0.7);  // …while eroding to a sliver
-      pts = pts.map(q2=>[cg[0]*drift + (q2[0]-cg[0])*shrink,
-                         cg[1]*drift + (q2[1]-cg[1])*shrink]);
-      c.beginPath();
-      for(let i=0;i<pts.length;i++){
-        const X=pts[i][0]*scale, Y=pts[i][1]*scale;
-        const sx=X*ca-Y*sa, sy=X*sa+Y*ca;
-        i? c.lineTo(sx,sy) : c.moveTo(sx,sy);
+      if(p>=0.3 && (gl.n==='scribble'||gl.n==='tealChip')) continue; // center accents leave first
+      let polys=[varyPoly(gl.p, rngV, amt)];
+      for(let k=1;k<=steps;k++) polys=evolveGlyph(polys, k, gi, P.seed);
+      for(let pts of polys){
+        if(pts.length<3) continue;
+        if(flash){
+          const cg=centroid(pts);
+          pts=pts.map(v=>[cg[0]+(v[0]-cg[0])*1.07, cg[1]+(v[1]-cg[1])*1.07]);
+        }
+        c.beginPath();
+        for(let i=0;i<pts.length;i++){
+          const X=pts[i][0]*scale, Y=pts[i][1]*scale;
+          const sx=X*ca-Y*sa, sy=X*sa+Y*ca;
+          i? c.lineTo(sx,sy) : c.moveTo(sx,sy);
+        }
+        c.closePath();
+        c.fillStyle = flash? pal.core : ROLE[gl.r];
+        c.fill();
       }
-      c.closePath();
-      c.fillStyle = flash? pal.core : ROLE[gl.r];
-      c.fill();
     }
     if(!flash && P.debris){
       c.lineCap='round'; c.lineWidth=tickW;

@@ -1,4 +1,4 @@
-# Bang Sheet — 2D Impact FX Playground
+# BangFX — 2D Impact FX Playground
 
 A standalone, single-file playground for prototyping hand-drawn-style 2D impact FX
 (Spider-Verse / anime FX language) without knowing how to draw. Aimed at compers and
@@ -20,7 +20,7 @@ A standalone, single-file playground for prototyping hand-drawn-style 2D impact 
 - **Seeded variation** — same recipe + same seed = same frames. Reroll for a fresh
   take that keeps the art direction.
 - **Export** — transparent sprite-sheet PNG (one cell per drawing) named with the
-  recipe (`bangsheet_burst_1234_8dwg_on2s.png`), plus a copy-paste JSON recipe for
+  recipe (`bangfx_burst_1234_8dwg_on2s.png`), plus a copy-paste JSON recipe for
   sharing setups.
 
 ## Controls

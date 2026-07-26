@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bang Sheet — 2D Impact FX Playground</title>
+<title>BangFX — 2D Impact FX Playground</title>
 <style>
   :root{
     --bg:#14141b; --panel:#1b1b24; --panel2:#22222e; --line:#2c2c3a;
@@ -104,7 +104,7 @@
 <body>
 <div id="app">
   <header>
-    <span class="wordmark">Bang<b>&hairsp;Sheet</b></span>
+    <span class="wordmark">Bang<b>FX</b></span>
     <span class="tagline">procedural 2D impact FX — for people who can't draw (yet)</span>
     <span class="spacer"></span>
     <button class="btn" id="copyRecipe" title="Copy the current settings as JSON">Copy recipe</button>
@@ -915,7 +915,7 @@ document.getElementById('exportSheet').addEventListener('click', ()=>{
   off.toBlob(blob=>{
     const a=document.createElement('a');
     a.href=URL.createObjectURL(blob);
-    a.download=`bangsheet_${P.arch}_${P.seed}_${D}dwg_on${P.exposure}s.png`;
+    a.download=`bangfx_${P.arch}_${P.seed}_${D}dwg_on${P.exposure}s.png`;
     a.click();
     setTimeout(()=>URL.revokeObjectURL(a.href),5000);
   });

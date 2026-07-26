@@ -136,7 +136,7 @@
       <h2>Shape</h2>
       <div class="row"><label for="pEnergy">Energy</label><input id="pEnergy" type="range" min="0.4" max="1.6" step="0.05" value="1"><output for="pEnergy">1.00</output></div>
       <div class="row"><label for="pDetail">Detail</label><input id="pDetail" type="range" min="3" max="12" step="1" value="7"><output for="pDetail">7</output></div>
-      <div class="row"><label for="pJag">Jag</label><input id="pJag" type="range" min="0" max="1" step="0.05" value="0.55"><output for="pJag">0.55</output></div>
+      <div class="row"><label for="pJag">Warp</label><input id="pJag" type="range" min="0" max="1" step="0.05" value="0.55"><output for="pJag">0.55</output></div>
     </div>
 
     <div class="sec">
@@ -278,83 +278,130 @@ function starPts(cx,cy, rOut, rIn, n, seed, di, ang0){
   return pts;
 }
 function centroid(pts){let x=0,y=0;for(const q of pts){x+=q[0];y+=q[1];}return [x/pts.length,y/pts.length];}
-// perturb spike lengths / rotation / scale — a new "take" of the same design
-function varyPoly(pts, rng, amt){
-  const c=centroid(pts);
-  const rad=pts.map(q=>Math.hypot(q[0]-c[0],q[1]-c[1]));
-  const med=rad.slice().sort((a,b)=>a-b)[rad.length>>1];
-  const rot=(rng()-0.5)*0.16*amt, sc=1+(rng()-0.5)*0.2*amt;
-  const ca=Math.cos(rot), sa=Math.sin(rot);
-  return pts.map((q,i)=>{
-    let dx=q[0]-c[0], dy=q[1]-c[1];
-    let k=sc, da=0;
-    if(rad[i]>med*1.12){ k*=1+(rng()-0.5)*0.5*amt; da=(rng()-0.5)*0.24*amt; } // apexes migrate, not just stretch
-    dx*=k; dy*=k;
-    const cb=Math.cos(rot+da), sb=Math.sin(rot+da);
-    return [c[0]+dx*cb-dy*sb, c[1]+dx*sb+dy*cb];
-  });
+function hexRgb(h){ return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)]; }
+function vnoise(x,y,seed){
+  const xi=Math.floor(x), yi=Math.floor(y), fx=x-xi, fy=y-yi;
+  const u=fx*fx*(3-2*fx), v=fy*fy*(3-2*fy);
+  const a=hash(seed,xi,yi), b=hash(seed,xi+1,yi), c2=hash(seed,xi,yi+1), d=hash(seed,xi+1,yi+1);
+  return a+(b-a)*u+(c2-a)*v+(a-b-c2+d)*u*v;
 }
-/* organic decay: chained shape-evolution operators (unit space, hit at origin) */
-function polyExtent(P){
+function worleyM(x,y,seed){
+  const xi=Math.floor(x), yi=Math.floor(y);
+  let best=9;
+  for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+    const cx=xi+dx, cy=yi+dy;
+    const px=cx+hash(seed,cx,cy), py=cy+hash(seed+7331,cx,cy);
+    const d=Math.abs(x-px)+Math.abs(y-py);
+    if(d<best)best=d;
+  }
+  return best;
+}
+/* signed-distance field per glyph (unit space, hit at origin) */
+function buildSDF(pts){
   let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
-  for(const v of P){x0=Math.min(x0,v[0]);y0=Math.min(y0,v[1]);x1=Math.max(x1,v[0]);y1=Math.max(y1,v[1]);}
-  return Math.max(x1-x0,y1-y0);
+  for(const v of pts){x0=Math.min(x0,v[0]);y0=Math.min(y0,v[1]);x1=Math.max(x1,v[0]);y1=Math.max(y1,v[1]);}
+  const ext=Math.max(x1-x0,y1-y0);
+  const pad=ext*0.5;
+  x0-=pad; y0-=pad; x1+=pad; y1+=pad;
+  const N=88, grid=new Float32Array(N*N);
+  const sx=(x1-x0)/(N-1), sy=(y1-y0)/(N-1);
+  for(let gy=0;gy<N;gy++)for(let gx=0;gx<N;gx++){
+    const px=x0+gx*sx, py=y0+gy*sy;
+    let dmin=1e9, inside=false;
+    for(let i=0,j=pts.length-1;i<pts.length;j=i++){
+      const a=pts[j], b=pts[i];
+      const ex=b[0]-a[0], ey=b[1]-a[1];
+      const t=clamp(((px-a[0])*ex+(py-a[1])*ey)/(ex*ex+ey*ey||1),0,1);
+      const dx=px-(a[0]+ex*t), dy=py-(a[1]+ey*t);
+      dmin=Math.min(dmin, dx*dx+dy*dy);
+      if((a[1]>py)!==(b[1]>py) && px < a[0]+(py-a[1])*(b[0]-a[0])/(b[1]-a[1])) inside=!inside;
+    }
+    grid[gy*N+gx]=(inside?1:-1)*Math.sqrt(dmin);
+  }
+  return {grid,N,x0,y0,sx,sy,ext,bx0:x0,by0:y0,bx1:x1,by1:y1};
 }
-function clipHalf(P, px, py, nx, ny){
-  const out=[];
-  for(let i=0;i<P.length;i++){
-    const a=P[i], b=P[(i+1)%P.length];
-    const da=(a[0]-px)*nx+(a[1]-py)*ny, db=(b[0]-px)*nx+(b[1]-py)*ny;
-    if(da>=0) out.push(a);
-    if((da>=0)!==(db>=0)){
-      const t=da/(da-db);
-      out.push([a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t]);
+function sdfAt(S2,x,y){
+  const gx=(x-S2.x0)/S2.sx, gy=(y-S2.y0)/S2.sy;
+  if(gx<0||gy<0||gx>=S2.N-1||gy>=S2.N-1) return -S2.ext;
+  const x0=gx|0, y0=gy|0, fx=gx-x0, fy=gy-y0;
+  const g=S2.grid, N=S2.N;
+  const a=g[y0*N+x0], b=g[y0*N+x0+1], c=g[(y0+1)*N+x0], d=g[(y0+1)*N+x0+1];
+  return a+(b-a)*fx+(c-a)*fy+(a-b-c+d)*fx*fy;
+}
+const GSDF = GLYPHS.map(g2=>buildSDF(g2.p));
+const UB = (()=>{
+  let u0=1e9,v0=1e9,u1=-1e9,v1=-1e9;
+  for(const S2 of GSDF){u0=Math.min(u0,S2.bx0);v0=Math.min(v0,S2.by0);u1=Math.max(u1,S2.bx1);v1=Math.max(v1,S2.by1);}
+  return {u0:u0-0.1, v0:v0-0.1, u1:u1+0.25, v1:v1+0.25};
+})();
+/* IlluGen principle: animate the field, re-threshold every drawing */
+function fieldParams(P, di){
+  const ph=phaseOf(di,P), wk=P.jag;
+  if(ph.name==='flash') return {tau:-0.05, warp:0.05, q:0, white:true};
+  if(ph.name==='peak')  return {tau:0, warp:0.03+0.05*wk, q:0};
+  const p=ph.p;
+  if(p<0.3) return {tau:(p<0.15?0.004:-0.004), warp:0.04+0.06*wk, q:0};   // boil holds
+  const q=(p-0.3)/0.7;
+  return {tau:0.008+0.022*q, warp:(0.05+0.17*q)*(0.6+0.8*wk), q};
+}
+const FIELD_CACHE=new Map();
+function getFieldFrame(P, di){
+  const key=[P.seed,P.pal,P.jag.toFixed(2),P.drawings,P.exposure,P.flash,di].join('|');
+  if(FIELD_CACHE.has(key)) return FIELD_CACHE.get(key);
+  const fr=buildFieldFrame(P, di);
+  FIELD_CACHE.set(key, fr);
+  if(FIELD_CACHE.size>60) FIELD_CACHE.delete(FIELD_CACHE.keys().next().value);
+  return fr;
+}
+function prebuildFields(P){
+  for(let d2=0; d2<P.drawings; d2++) setTimeout(()=>{ try{getFieldFrame(P,d2);}catch(e){} }, 15+d2*35);
+}
+function buildFieldFrame(P, di){
+  const st=fieldParams(P,di);
+  const pal=PALETTES[P.pal];
+  const ROLE={pri:hexRgb(pal.primary), sec:hexRgb(pal.secondary), core:hexRgb(pal.core), ink:hexRgb(pal.ink)};
+  const WHITE=hexRgb(pal.core);
+  const K=240;
+  const W=Math.ceil((UB.u1-UB.u0)*K), H=Math.ceil((UB.v1-UB.v0)*K);
+  const cv2=document.createElement('canvas'); cv2.width=W; cv2.height=H;
+  const img=new ImageData(W,H), dt=img.data;
+  for(let gi=0; gi<GLYPHS.length; gi++){
+    const gl=GLYPHS[gi], S2=GSDF[gi], ext=S2.ext;
+    if(st.q>=0.35 && (gl.n==='scribble'||gl.n==='tealChip')) continue;
+    const C=st.white? WHITE : ROLE[gl.r];
+    const cg=centroid(gl.p);
+    let rl=Math.hypot(cg[0],cg[1]), rdx=1, rdy=0;
+    if(rl>0.02){ rdx=cg[0]/rl; rdy=cg[1]/rl; }
+    const drop=0.6+hash(P.seed,gi,3)*0.4;
+    const q=clamp(st.q/drop,0,1);
+    if(q>=1) continue;
+    const shift=q*ext*0.55, wA=st.warp*ext, frq=2.6/ext;
+    const m=wA+shift+0.02;
+    const px0=Math.max(0,Math.floor((S2.bx0-m-UB.u0)*K)), px1=Math.min(W-1,Math.ceil((S2.bx1+m-UB.u0)*K));
+    const py0=Math.max(0,Math.floor((S2.by0-m-UB.v0)*K)), py1=Math.min(H-1,Math.ceil((S2.by1+m-UB.v0)*K));
+    const tauAbs=st.tau*ext + q*ext*0.05;
+    for(let y=py0;y<=py1;y++){
+      for(let x=px0;x<=px1;x++){
+        const wx=UB.u0+x/K, wy=UB.v0+y/K;
+        const pj=((wx*rdx+wy*rdy) - (rl-ext*0.5))/ext;   // trailing edge burns first
+        const sx2=wx-rdx*shift, sy2=wy-rdy*shift;        // domain slides outward
+        const nx=(vnoise(sx2*frq+di*3.7, sy2*frq, P.seed)-0.5)*2;
+        const ny=(vnoise(sx2*frq, sy2*frq+di*4.1, P.seed+9)-0.5)*2;
+        let f=sdfAt(S2, sx2+nx*wA, sy2+ny*wA);
+        if(st.q>0){
+          const w2=worleyM(sx2*3.4/ext+di*0.31, sy2*3.4/ext, P.seed+5);
+          f-=q*ext*0.45*Math.max(0,0.5-w2);
+          f-=q*ext*0.45*Math.max(0,0.55-clamp(pj,0,1));
+        }
+        if(f>tauAbs){
+          const i=(y*W+x)*4;
+          dt[i]=C[0]; dt[i+1]=C[1]; dt[i+2]=C[2]; dt[i+3]=255;
+        }
+      }
     }
   }
-  return out;
-}
-function evolveGlyph(polys, k, gi, seed){
-  const out=[];
-  polys.forEach((P,pi)=>{
-    if(P.length<3) return;
-    const cg=centroid(P);
-    let rdx=cg[0], rdy=cg[1], rl=Math.hypot(rdx,rdy);
-    if(rl<1e-3){rdx=1;rdy=0;rl=1;}
-    rdx/=rl; rdy/=rl;
-    const ext=polyExtent(P);
-    const pj=P.map(v=>v[0]*rdx+v[1]*rdy);
-    const mn=Math.min.apply(null,pj), mx=Math.max.apply(null,pj), rr=Math.max(1e-4,mx-mn);
-    // leading edge advances, trailing edge collapses onto the radial spine
-    let Q=P.map((v,i)=>{
-      const t=(pj[i]-mn)/rr;
-      const adv=ext*(0.05+0.22*t);
-      let x=v[0]+rdx*adv, y=v[1]+rdy*adv;
-      const cl=(1-t)*0.32;
-      const tx=cg[0]+rdx*ext*0.15, ty=cg[1]+rdy*ext*0.15;
-      x+=(tx-x)*cl; y+=(ty-y)*cl;
-      x+=-rdy*(hash(seed+gi*77+pi,i,k)-0.5)*ext*0.14;
-      y+= rdx*(hash(seed+gi*77+pi,i+40,k)-0.5)*ext*0.14;
-      return [x,y];
-    });
-    // lateral thinning: mass streaks out along its radial axis
-    const c2=centroid(Q);
-    Q=Q.map(v=>{
-      const ax=(v[0]-c2[0])*rdx+(v[1]-c2[1])*rdy;
-      const bx=(v[0]-c2[0])-ax*rdx, by=(v[1]-c2[1])-ax*rdy;
-      return [c2[0]+ax*rdx+bx*0.84, c2[1]+ax*rdy+by*0.84];
-    });
-    // seeded one-time split: the drawn breakup
-    const splitAt=1+((hash(seed,gi*31+pi,999)*2)|0);
-    if(k===splitAt && Q.length>5 && polyExtent(Q)>0.13){
-      const ang=Math.atan2(rdy,rdx)+Math.PI/2+(hash(seed,gi*13+pi,55)-0.5)*0.8;
-      const nx=Math.cos(ang), ny=Math.sin(ang);
-      const g1=clipHalf(Q,c2[0],c2[1],nx,ny), g2=clipHalf(Q,c2[0],c2[1],-nx,-ny);
-      const gap=ext*0.06;
-      out.push(g1.map(v=>[v[0]+nx*gap, v[1]+ny*gap]));
-      out.push(g2.map(v=>[v[0]-nx*gap*1.5, v[1]-ny*gap*1.5]));
-    } else out.push(Q);
-  });
-  return out.filter(P=>P.length>2 && polyExtent(P)>0.03);
+  cv2.getContext('2d').putImageData(img,0,0);
+  return {cv:cv2, K};
 }
 function drawBurst(c, g, P, di){
   const ph = phaseOf(di,P), pal = PALETTES[P.pal];
@@ -362,7 +409,6 @@ function drawBurst(c, g, P, di){
   const dirA = g.ang;
   const rot = dirA + 1.02;                 // align the approach needle with the drag
   const scale = R*0.62;                    // glyph coords are unit-normalized around the hit
-  const ROLE = {pri:pal.primary, sec:pal.secondary, core:pal.core, ink:pal.ink};
   // thin dash confetti (vector overlay)
   const rng = mulberry32(P.seed+77);
   const ticks=[];
@@ -390,32 +436,10 @@ function drawBurst(c, g, P, di){
   else {
     const flash = ph.name==='flash';
     const p = ph.name==='decay'? ph.p : 0;
-    const rngV = mulberry32(P.seed + di*101);   // boil: new take per held drawing
-    const amt = 0.3 + P.jag*0.5;
-    const ca=Math.cos(rot), sa=Math.sin(rot);
-    const steps = Math.round(p*4);
-    for(let gi=0; gi<GLYPHS.length; gi++){
-      const gl=GLYPHS[gi];
-      if(p>=0.3 && (gl.n==='scribble'||gl.n==='tealChip')) continue; // center accents leave first
-      let polys=[varyPoly(gl.p, rngV, amt)];
-      for(let k=1;k<=steps;k++) polys=evolveGlyph(polys, k, gi, P.seed);
-      for(let pts of polys){
-        if(pts.length<3) continue;
-        if(flash){
-          const cg=centroid(pts);
-          pts=pts.map(v=>[cg[0]+(v[0]-cg[0])*1.07, cg[1]+(v[1]-cg[1])*1.07]);
-        }
-        c.beginPath();
-        for(let i=0;i<pts.length;i++){
-          const X=pts[i][0]*scale, Y=pts[i][1]*scale;
-          const sx=X*ca-Y*sa, sy=X*sa+Y*ca;
-          i? c.lineTo(sx,sy) : c.moveTo(sx,sy);
-        }
-        c.closePath();
-        c.fillStyle = flash? pal.core : ROLE[gl.r];
-        c.fill();
-      }
-    }
+    const fr = getFieldFrame(P, di);
+    c.save(); c.rotate(rot);
+    c.drawImage(fr.cv, UB.u0*scale, UB.v0*scale, (UB.u1-UB.u0)*scale, (UB.v1-UB.v0)*scale);
+    c.restore();
     if(!flash && P.debris){
       c.lineCap='round'; c.lineWidth=tickW;
       for(const t of ticks){
@@ -435,9 +459,6 @@ function drawBurst(c, g, P, di){
   c.restore();
 }
 
-/* ============================================================
-   Generators — each renders one held drawing, deterministically
-   ============================================================ */
 function drawPoof(c, g, P, di){
   const ph = phaseOf(di,P), pal = PALETTES[P.pal];
   const R = g.len * P.energy;
@@ -694,6 +715,7 @@ function spawn(g){
   const P = snapshotParams();
   if(P.arch==='lines' && g.path.length<4) g.path = synthPath(g);
   instances.push({P, g, start:frames});
+  if(P.arch==='burst') prebuildFields(P);
   if(instances.length>30) instances.shift();
   lastGesture = g;
   if(!playing) scrubFrame = (P.flash?2:1)*P.exposure; // paused: land on the peak drawing
